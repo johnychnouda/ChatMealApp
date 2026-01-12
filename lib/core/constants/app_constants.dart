@@ -3,6 +3,8 @@ class AppConstants {
   // App Info
   static const String appName = 'ChatMeal';
   static const String appTagline = 'Order food with your voice';
+  static const String appVersion = '1.0.0';
+  static const String developerName = 'ChatMeal Team';
 
   // Splash Screen
   static const Duration splashDuration = Duration(seconds: 3);

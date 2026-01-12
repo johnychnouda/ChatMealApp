@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/constants/app_constants.dart';
 import '../../../core/services/auth_service.dart';
+import '../../../core/theme/app_theme.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -172,112 +173,156 @@ class _SplashScreenState extends State<SplashScreen>
             context.go('/onboarding');
           }
         },
-        child: Center(
-          child: AnimatedBuilder(
-            animation: _animationController,
-            builder: (context, child) {
-              return FadeTransition(
-                opacity: _fadeAnimation,
-                child: ScaleTransition(
-                  scale: _scaleAnimation,
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                    // Logo
-                    Container(
-                      width: 200,
-                      height: 200,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(40),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.3),
-                            blurRadius: 20,
-                            spreadRadius: 5,
+        child: Stack(
+          children: [
+            // Main centered content
+            Center(
+              child: AnimatedBuilder(
+                animation: _animationController,
+                builder: (context, child) {
+                  return FadeTransition(
+                    opacity: _fadeAnimation,
+                    child: ScaleTransition(
+                      scale: _scaleAnimation,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          // Logo
+                          Container(
+                            width: 200,
+                            height: 200,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(40),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.3),
+                                  blurRadius: 20,
+                                  spreadRadius: 5,
+                                ),
+                              ],
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(40),
+                              child: Image.asset(
+                                'assets/images/app_icon.png',
+                                fit: BoxFit.contain,
+                                errorBuilder: (context, error, stackTrace) {
+                                  // Fallback if image doesn't exist yet
+                                  return Container(
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF1A4D4D),
+                                      borderRadius: BorderRadius.circular(40),
+                                    ),
+                                    child: const Icon(
+                                      Icons.restaurant_menu,
+                                      size: 100,
+                                      color: Color(0xFFF4A460),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 40),
+                          // App Name with fade-in animation and gradient colors
+                          FadeTransition(
+                            opacity: _fadeAnimation,
+                            child: ShaderMask(
+                              shaderCallback: (bounds) => LinearGradient(
+                                colors: [
+                                  AppTheme.darkTealGreen,
+                                  AppTheme.lightTeal,
+                                  AppTheme.goldenYellow,
+                                  AppTheme.goldenOrange,
+                                ],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                              ).createShader(bounds),
+                              child: const Text(
+                                AppConstants.appName,
+                                style: TextStyle(
+                                  fontSize: 42,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white,
+                                  letterSpacing: 2,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          // Tagline
+                          FadeTransition(
+                            opacity: Tween<double>(begin: 0.0, end: 1.0).animate(
+                              CurvedAnimation(
+                                parent: _animationController,
+                                curve: const Interval(0.4, 1.0, curve: Curves.easeIn),
+                              ),
+                            ),
+                            child: const Text(
+                              AppConstants.appTagline,
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: Color(0xFFF4A460),
+                                letterSpacing: 1,
+                                fontWeight: FontWeight.w300,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 60),
+                          // Loading indicator
+                          FadeTransition(
+                            opacity: Tween<double>(begin: 0.0, end: 1.0).animate(
+                              CurvedAnimation(
+                                parent: _animationController,
+                                curve: const Interval(0.6, 1.0, curve: Curves.easeIn),
+                              ),
+                            ),
+                            child: const SizedBox(
+                              width: 40,
+                              height: 40,
+                              child: CircularProgressIndicator(
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  Color(0xFFF4A460),
+                                ),
+                                strokeWidth: 3,
+                              ),
+                            ),
                           ),
                         ],
                       ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(40),
-                        child: Image.asset(
-                          'assets/images/app_icon.png',
-                          fit: BoxFit.contain,
-                          errorBuilder: (context, error, stackTrace) {
-                            // Fallback if image doesn't exist yet
-                            return Container(
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1A4D4D),
-                                borderRadius: BorderRadius.circular(40),
-                              ),
-                              child: const Icon(
-                                Icons.restaurant_menu,
-                                size: 100,
-                                color: Color(0xFFF4A460),
-                              ),
-                            );
-                          },
-                        ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            // Developer name and version at bottom
+            SafeArea(
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 32),
+                  child: FadeTransition(
+                    opacity: Tween<double>(begin: 0.0, end: 1.0).animate(
+                      CurvedAnimation(
+                        parent: _animationController,
+                        curve: const Interval(0.7, 1.0, curve: Curves.easeIn),
                       ),
                     ),
-                    const SizedBox(height: 40),
-                    // App Name with fade-in animation
-                    FadeTransition(
-                      opacity: _fadeAnimation,
-                      child: const Text(
-                        AppConstants.appName,
-                        style: TextStyle(
-                          fontSize: 42,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                          letterSpacing: 2,
-                        ),
+                    child: Text(
+                      '${AppConstants.developerName} • v${AppConstants.appVersion}',
+                      style: TextStyle(
+                        color: Colors.grey[500],
+                        fontSize: 14,
+                        letterSpacing: 0.5,
+                        fontWeight: FontWeight.w400,
                       ),
+                      textAlign: TextAlign.center,
                     ),
-                    const SizedBox(height: 16),
-                    // Tagline
-                    FadeTransition(
-                      opacity: Tween<double>(begin: 0.0, end: 1.0).animate(
-                        CurvedAnimation(
-                          parent: _animationController,
-                          curve: const Interval(0.4, 1.0, curve: Curves.easeIn),
-                        ),
-                      ),
-                      child: const Text(
-                        AppConstants.appTagline,
-                        style: TextStyle(
-                          fontSize: 16,
-                          color: Color(0xFFF4A460),
-                          letterSpacing: 1,
-                          fontWeight: FontWeight.w300,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 60),
-                    // Loading indicator
-                    FadeTransition(
-                      opacity: Tween<double>(begin: 0.0, end: 1.0).animate(
-                        CurvedAnimation(
-                          parent: _animationController,
-                          curve: const Interval(0.6, 1.0, curve: Curves.easeIn),
-                        ),
-                      ),
-                      child: const SizedBox(
-                        width: 40,
-                        height: 40,
-                        child: CircularProgressIndicator(
-                          valueColor: AlwaysStoppedAnimation<Color>(
-                            Color(0xFFF4A460),
-                          ),
-                          strokeWidth: 3,
-                        ),
-                      ),
-                    ),
-                    ],
                   ),
                 ),
-              );
-            },
-          ),
+              ),
+            ),
+          ],
         ),
       ),
     );

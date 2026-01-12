@@ -160,28 +160,16 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                   ),
                 ),
                 const SizedBox(height: 16),
-                // ChatMeal with gradient
-                ShaderMask(
-                  shaderCallback: (bounds) => LinearGradient(
-                    colors: [
-                      AppTheme.darkTealGreen,
-                      AppTheme.lightTeal,
-                      AppTheme.goldenYellow,
-                      AppTheme.goldenOrange,
-                    ],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ).createShader(bounds),
-                  child: const Text(
-                    'ChatMeal',
-                    style: TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                      letterSpacing: 0.5,
-                    ),
-                    textAlign: TextAlign.center,
+                // ChatMeal with logo color
+                const Text(
+                  'ChatMeal',
+                  style: TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                    color: AppTheme.darkTealGreen,
+                    letterSpacing: 0.5,
                   ),
+                  textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 16),
                 // Subtitle
@@ -248,6 +236,17 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                   ),
                 ),
                 const SizedBox(height: 24),
+                // Developer name and version
+                Text(
+                  '${AppConstants.developerName} • v${AppConstants.appVersion}',
+                  style: TextStyle(
+                    color: Colors.grey[700],
+                    fontSize: 11,
+                    letterSpacing: 0.3,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
                 // Privacy and Terms links
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,

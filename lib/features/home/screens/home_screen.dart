@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/services/auth_service.dart';
+import '../../../core/constants/app_constants.dart';
 
 class Message {
   final String text;
@@ -17,6 +19,227 @@ class Message {
   });
 }
 
+class _ActionCard extends StatefulWidget {
+  final String title;
+  final String description;
+  final IconData icon;
+  final Gradient gradient;
+  final Color shadowColor;
+  final Color textColor;
+  final Color iconColor;
+  final VoidCallback onTap;
+
+  const _ActionCard({
+    required this.title,
+    required this.description,
+    required this.icon,
+    required this.gradient,
+    required this.shadowColor,
+    required this.textColor,
+    required this.iconColor,
+    required this.onTap,
+  });
+
+  @override
+  State<_ActionCard> createState() => _ActionCardState();
+}
+
+class _ActionCardState extends State<_ActionCard>
+    with SingleTickerProviderStateMixin {
+  bool _isPressed = false;
+  late AnimationController _pressController;
+  late Animation<double> _scaleAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _pressController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 150),
+    );
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.97).animate(
+      CurvedAnimation(parent: _pressController, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _pressController.dispose();
+    super.dispose();
+  }
+
+  void _handleTapDown(TapDownDetails details) {
+    setState(() => _isPressed = true);
+    _pressController.forward();
+  }
+
+  void _handleTapUp(TapUpDetails details) {
+    setState(() => _isPressed = false);
+    _pressController.reverse();
+    widget.onTap();
+  }
+
+  void _handleTapCancel() {
+    setState(() => _isPressed = false);
+    _pressController.reverse();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: '${widget.title}. ${widget.description}',
+      child: GestureDetector(
+        onTapDown: _handleTapDown,
+        onTapUp: _handleTapUp,
+        onTapCancel: _handleTapCancel,
+        child: ScaleTransition(
+          scale: _scaleAnimation,
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              gradient: widget.gradient,
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: [
+                BoxShadow(
+                  color: widget.shadowColor.withValues(alpha: _isPressed ? 0.3 : 0.4),
+                  blurRadius: _isPressed ? 15 : 20,
+                  spreadRadius: 0,
+                  offset: Offset(0, _isPressed ? 6 : 8),
+                ),
+              ],
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        widget.iconColor.withValues(alpha: 0.35),
+                        widget.iconColor.withValues(alpha: 0.2),
+                        widget.iconColor.withValues(alpha: 0.1),
+                        widget.iconColor.withValues(alpha: 0.05),
+                      ],
+                      stops: const [0.0, 0.3, 0.7, 1.0],
+                    ),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: widget.iconColor.withValues(alpha: 0.6),
+                      width: 2.5,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: widget.iconColor.withValues(alpha: 0.4),
+                        blurRadius: 16,
+                        spreadRadius: 0,
+                        offset: const Offset(0, 6),
+                      ),
+                      BoxShadow(
+                        color: widget.iconColor.withValues(alpha: 0.25),
+                        blurRadius: 8,
+                        spreadRadius: 1,
+                        offset: const Offset(0, 3),
+                      ),
+                      BoxShadow(
+                        color: widget.iconColor.withValues(alpha: 0.1),
+                        blurRadius: 4,
+                        spreadRadius: 2,
+                        offset: const Offset(0, 1),
+                      ),
+                    ],
+                  ),
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      // Outer glow ring
+                      Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(14),
+                          gradient: RadialGradient(
+                            center: Alignment.center,
+                            radius: 0.8,
+                            colors: [
+                              widget.iconColor.withValues(alpha: 0.15),
+                              Colors.transparent,
+                            ],
+                          ),
+                        ),
+                      ),
+                      // Inner highlight
+                      Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(14),
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              Colors.white.withValues(alpha: 0.1),
+                              Colors.transparent,
+                            ],
+                          ),
+                        ),
+                      ),
+                      // Icon with subtle shadow
+                      ShaderMask(
+                        shaderCallback: (bounds) => LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            widget.iconColor,
+                            widget.iconColor.withValues(alpha: 0.9),
+                          ],
+                        ).createShader(bounds),
+                        child: Icon(
+                          widget.icon,
+                          color: Colors.white,
+                          size: 28,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.title,
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                          color: widget.textColor,
+                          letterSpacing: 0.3,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        widget.description,
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: widget.textColor.withValues(alpha: 0.95),
+                          height: 1.5,
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -24,13 +247,17 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen>
+    with SingleTickerProviderStateMixin {
   bool _isListening = false;
   bool _showRestaurants = false; // Default to chat view
   final ScrollController _scrollController = ScrollController();
   final List<Message> _messages = [];
 
   String _selectedCategory = 'All';
+  late AnimationController _cardAnimationController;
+  late Animation<double> _card1Animation;
+  late Animation<double> _card2Animation;
 
   // Sample restaurants grouped by category
   final Map<String, List<Map<String, dynamic>>> _restaurantsByCategory = {
@@ -179,11 +406,42 @@ class _HomeScreenState extends State<HomeScreen> {
       timestamp: DateTime.now(),
       showQuickActions: true,
     ));
+    _setupCardAnimations();
+  }
+
+  void _setupCardAnimations() {
+    _cardAnimationController = AnimationController(
+      vsync: this,
+      duration: AppConstants.mediumAnimation,
+    );
+
+    _card1Animation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(
+      CurvedAnimation(
+        parent: _cardAnimationController,
+        curve: const Interval(0.0, 0.6, curve: Curves.easeOut),
+      ),
+    );
+
+    _card2Animation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(
+      CurvedAnimation(
+        parent: _cardAnimationController,
+        curve: const Interval(0.2, 0.8, curve: Curves.easeOut),
+      ),
+    );
+
+    _cardAnimationController.forward();
   }
 
   @override
   void dispose() {
     _scrollController.dispose();
+    _cardAnimationController.dispose();
     super.dispose();
   }
 
@@ -772,174 +1030,116 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: 48),
               
               // Browse Restaurants Card
-              GestureDetector(
-                onTap: () {
-                  setState(() {
-                    _showRestaurants = true;
-                    _messages.add(Message(
-                      text: "Browse restaurants",
-                      isAI: false,
-                      timestamp: DateTime.now(),
-                    ));
-                    _scrollToBottom();
-                    Future.delayed(const Duration(milliseconds: 500), () {
-                      if (mounted) {
-                        setState(() {
-                          _messages.add(Message(
-                            text: "Great! Browse through the restaurants above and tap on any restaurant to start ordering. 🍽️",
-                            isAI: true,
-                            timestamp: DateTime.now(),
-                          ));
-                          _scrollToBottom();
-                        });
-                      }
-                    });
-                  });
-                },
-                child: Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        AppTheme.goldenYellow,
-                        AppTheme.goldenOrange,
-                      ],
+              AnimatedBuilder(
+                animation: _cardAnimationController,
+                builder: (context, child) {
+                  return Opacity(
+                    opacity: _card1Animation.value,
+                    child: Transform.translate(
+                      offset: Offset(0, 20 * (1 - _card1Animation.value)),
+                      child: Transform.scale(
+                        scale: 0.95 + (0.05 * _card1Animation.value),
+                        child: _ActionCard(
+                          title: 'Browse Restaurants',
+                          description: 'Explore menus and discover amazing local restaurants',
+                          icon: Icons.restaurant_menu_rounded,
+                          gradient: const LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              AppTheme.goldenOrange,
+                              AppTheme.goldenYellow,
+                            ],
+                          ),
+                          shadowColor: AppTheme.goldenYellow,
+                          textColor: AppTheme.darkTealGreen,
+                          iconColor: AppTheme.darkTealGreen,
+                          onTap: () {
+                            HapticFeedback.mediumImpact();
+                            setState(() {
+                              _showRestaurants = true;
+                              _messages.add(Message(
+                                text: "Browse restaurants",
+                                isAI: false,
+                                timestamp: DateTime.now(),
+                              ));
+                              _scrollToBottom();
+                              Future.delayed(const Duration(milliseconds: 500), () {
+                                if (mounted) {
+                                  setState(() {
+                                    _messages.add(Message(
+                                      text: "Great! Browse through the restaurants above and tap on any restaurant to start ordering. 🍽️",
+                                      isAI: true,
+                                      timestamp: DateTime.now(),
+                                    ));
+                                    _scrollToBottom();
+                                  });
+                                }
+                              });
+                            });
+                          },
+                        ),
+                      ),
                     ),
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppTheme.goldenYellow.withValues(alpha: 0.4),
-                        blurRadius: 20,
-                        spreadRadius: 0,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.2),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(
-                          Icons.restaurant_menu,
-                          color: Colors.white,
-                          size: 32,
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      const Text(
-                        'Browse Restaurants',
-                        style: TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Explore menus and discover amazing local restaurants',
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Colors.white.withValues(alpha: 0.9),
-                          height: 1.4,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                  );
+                },
               ),
               
               const SizedBox(height: 20),
               
               // Speak with AI Card
-              GestureDetector(
-                onTap: () {
-                  setState(() {
-                    _messages.add(Message(
-                      text: "Speak with AI agent",
-                      isAI: false,
-                      timestamp: DateTime.now(),
-                    ));
-                    _scrollToBottom();
-                    Future.delayed(const Duration(milliseconds: 500), () {
-                      if (mounted) {
-                        setState(() {
-                          _messages.add(Message(
-                            text: "Perfect! 🎤\n\nJust tell me what you'd like to eat, and I'll help you find the best restaurants and place your order. For example, say \"I want shawarma\" or \"I'm craving pizza\".",
-                            isAI: true,
-                            timestamp: DateTime.now(),
-                          ));
-                          _scrollToBottom();
-                        });
-                      }
-                    });
-                  });
-                },
-                child: Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        AppTheme.darkTealGreen,
-                        AppTheme.lightTeal,
-                      ],
+              AnimatedBuilder(
+                animation: _cardAnimationController,
+                builder: (context, child) {
+                  return Opacity(
+                    opacity: _card2Animation.value,
+                    child: Transform.translate(
+                      offset: Offset(0, 20 * (1 - _card2Animation.value)),
+                      child: Transform.scale(
+                        scale: 0.95 + (0.05 * _card2Animation.value),
+                        child: _ActionCard(
+                          title: 'Speak with AI',
+                          description: 'Order naturally using your voice - just tell me what you crave',
+                          icon: Icons.record_voice_over_rounded,
+                          gradient: const LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              AppTheme.darkTealGreen,
+                              AppTheme.lightTeal,
+                            ],
+                          ),
+                          shadowColor: AppTheme.darkTealGreen,
+                          textColor: AppTheme.goldenYellow,
+                          iconColor: AppTheme.goldenYellow,
+                          onTap: () {
+                            HapticFeedback.mediumImpact();
+                            setState(() {
+                              _messages.add(Message(
+                                text: "Speak with AI agent",
+                                isAI: false,
+                                timestamp: DateTime.now(),
+                              ));
+                              _scrollToBottom();
+                              Future.delayed(const Duration(milliseconds: 500), () {
+                                if (mounted) {
+                                  setState(() {
+                                    _messages.add(Message(
+                                      text: "Perfect! 🎤\n\nJust tell me what you'd like to eat, and I'll help you find the best restaurants and place your order. For example, say \"I want shawarma\" or \"I'm craving pizza\".",
+                                      isAI: true,
+                                      timestamp: DateTime.now(),
+                                    ));
+                                    _scrollToBottom();
+                                  });
+                                }
+                              });
+                            });
+                          },
+                        ),
+                      ),
                     ),
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppTheme.darkTealGreen.withValues(alpha: 0.4),
-                        blurRadius: 20,
-                        spreadRadius: 0,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.2),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(
-                          Icons.mic,
-                          color: Colors.white,
-                          size: 32,
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      const Text(
-                        'Speak with AI',
-                        style: TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Order naturally using your voice - just tell me what you crave',
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Colors.white.withValues(alpha: 0.9),
-                          height: 1.4,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                  );
+                },
               ),
             ],
           ),
