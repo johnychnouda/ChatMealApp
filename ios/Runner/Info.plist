@@ -45,5 +45,7 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>ChatMeal needs access to your microphone to record your voice for OpenAI Whisper speech recognition</string>
 </dict>
 </plist>

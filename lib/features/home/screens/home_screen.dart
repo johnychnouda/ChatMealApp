@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/services/auth_service.dart';
+import '../../../core/services/voice_service.dart';
+import '../../../core/services/openai_service.dart';
 import '../../../core/constants/app_constants.dart';
 
 class Message {
@@ -297,8 +299,17 @@ class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
   bool _isListening = false;
   bool _showRestaurants = false; // Default to chat view
+  bool _showMenu = false; // Show menu view
   final ScrollController _scrollController = ScrollController();
   final List<Message> _messages = [];
+  late VoiceService _voiceService;
+  late OpenAIService _openAIService;
+  String? _selectedRestaurant;
+  Map<String, dynamic>? _selectedRestaurantData; // Store full restaurant data
+  bool _autoListenAfterSpeaking = false;
+  bool _isProcessingAI = false;
+  // Conversation history for context
+  final List<Map<String, String>> _conversationHistory = [];
 
   String _selectedCategory = 'All';
   late AnimationController _cardAnimationController;
@@ -481,10 +492,97 @@ class _HomeScreenState extends State<HomeScreen>
     
     return allRestaurants.take(3).toList();
   }
+  
+  // Get restaurant data by name
+  Map<String, dynamic>? _getRestaurantByName(String name) {
+    final allRestaurants = _restaurantsByCategory.values
+        .expand((list) => list)
+        .toList();
+    try {
+      return allRestaurants.firstWhere(
+        (restaurant) => restaurant['name'] == name,
+      );
+    } catch (e) {
+      return null;
+    }
+  }
+  
+  // Get menu items for a restaurant (expand simple items list to full menu)
+  List<Map<String, dynamic>> _getMenuItems(String restaurantName, List<String> itemCategories) {
+    // Generate menu items based on categories
+    final menuItems = <Map<String, dynamic>>[];
+    
+    for (var category in itemCategories) {
+      switch (category.toLowerCase()) {
+        case 'pizza':
+          menuItems.addAll([
+            {'name': 'Margherita Pizza', 'description': 'Classic tomato, mozzarella, and basil', 'price': 12.99, 'category': 'Pizza'},
+            {'name': 'Pepperoni Pizza', 'description': 'Pepperoni, mozzarella, and tomato sauce', 'price': 14.99, 'category': 'Pizza'},
+            {'name': 'BBQ Chicken Pizza', 'description': 'BBQ chicken, red onions, and cilantro', 'price': 16.99, 'category': 'Pizza'},
+          ]);
+          break;
+        case 'shawarma':
+          menuItems.addAll([
+            {'name': 'Chicken Shawarma Wrap', 'description': 'Tender chicken with tahini and pickles', 'price': 8.99, 'category': 'Shawarma'},
+            {'name': 'Beef Shawarma Plate', 'description': 'Spiced beef with rice and salad', 'price': 14.99, 'category': 'Shawarma'},
+            {'name': 'Shawarma Sandwich', 'description': 'Chicken or beef shawarma in pita bread', 'price': 7.99, 'category': 'Shawarma'},
+          ]);
+          break;
+        case 'burgers':
+          menuItems.addAll([
+            {'name': 'Classic Burger', 'description': 'Beef patty, lettuce, tomato, and special sauce', 'price': 9.99, 'category': 'Burgers'},
+            {'name': 'Cheeseburger', 'description': 'Beef patty with cheese, pickles, and onions', 'price': 10.99, 'category': 'Burgers'},
+            {'name': 'BBQ Burger', 'description': 'Beef patty with BBQ sauce and crispy onions', 'price': 11.99, 'category': 'Burgers'},
+          ]);
+          break;
+        case 'pasta':
+          menuItems.addAll([
+            {'name': 'Spaghetti Carbonara', 'description': 'Creamy pasta with bacon and parmesan', 'price': 13.99, 'category': 'Pasta'},
+            {'name': 'Fettuccine Alfredo', 'description': 'Creamy alfredo sauce with parmesan', 'price': 12.99, 'category': 'Pasta'},
+            {'name': 'Penne Arrabbiata', 'description': 'Spicy tomato sauce with garlic', 'price': 11.99, 'category': 'Pasta'},
+          ]);
+          break;
+        case 'sushi':
+          menuItems.addAll([
+            {'name': 'Salmon Roll', 'description': 'Fresh salmon with rice and nori', 'price': 8.99, 'category': 'Sushi'},
+            {'name': 'California Roll', 'description': 'Crab, avocado, and cucumber', 'price': 7.99, 'category': 'Sushi'},
+            {'name': 'Dragon Roll', 'description': 'Eel and avocado topped with eel sauce', 'price': 12.99, 'category': 'Sushi'},
+          ]);
+          break;
+        default:
+          // Generic items for other categories
+          menuItems.add({
+            'name': category,
+            'description': 'Delicious $category',
+            'price': 9.99,
+            'category': category,
+          });
+      }
+    }
+    
+    return menuItems;
+  }
 
   @override
   void initState() {
     super.initState();
+    // Initialize voice service
+    _voiceService = VoiceService();
+    _voiceService.initialize().then((initialized) {
+      if (initialized && mounted) {
+        _setupVoiceCallbacks();
+      }
+    });
+    
+    // Initialize OpenAI service
+    _openAIService = OpenAIService();
+    _openAIService.initialize().then((hasApiKey) {
+      if (!hasApiKey && mounted) {
+        // Show API key setup dialog on first use
+        _showApiKeyDialog();
+      }
+    });
+    
     // Add initial AI greeting with action buttons
     _messages.add(Message(
       text: "",
@@ -497,14 +595,22 @@ class _HomeScreenState extends State<HomeScreen>
     // Rotate promotions every 5 seconds
     _startPromotionRotation();
     
+    // Give initial voice greeting
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted) {
+        _voiceService.speak("Welcome to ChatMeal! What would you like to do today?");
+      }
+    });
+    
     // Example: Set an active order (comment out to hide the banner)
-    _activeOrder = ActiveOrder(
-      id: 'ORD-12345',
-      restaurantName: 'Shawarma King',
-      status: OrderStatus.onTheWay,
-      estimatedTime: '15 min',
-      total: 24.99,
-    );
+    // TODO: Later we will work on order functionality
+    // _activeOrder = ActiveOrder(
+    //   id: 'ORD-12345',
+    //   restaurantName: 'Shawarma King',
+    //   status: OrderStatus.onTheWay,
+    //   estimatedTime: '15 min',
+    //   total: 24.99,
+    // );
   }
 
   void _startPromotionRotation() {
@@ -547,8 +653,506 @@ class _HomeScreenState extends State<HomeScreen>
     _cardAnimationController.forward();
   }
 
+  void _setupVoiceCallbacks() {
+    _voiceService.onResult = (text) {
+      if (mounted) {
+        _handleVoiceInput(text);
+      }
+    };
+    
+    _voiceService.onError = (error) {
+      if (mounted) {
+        debugPrint('Voice error: $error');
+        setState(() {
+          _isListening = false;
+        });
+      }
+    };
+    
+    _voiceService.onListeningStarted = () {
+      if (mounted) {
+        setState(() {
+          _isListening = true;
+        });
+      }
+    };
+    
+    _voiceService.onListeningStopped = () {
+      if (mounted) {
+        setState(() {
+          _isListening = false;
+        });
+      }
+    };
+    
+    _voiceService.onSpeakingCompleted = () {
+      // After AI finishes speaking, automatically start listening if enabled
+      if (_autoListenAfterSpeaking && mounted && !_voiceService.isListening) {
+        Future.delayed(const Duration(milliseconds: 300), () {
+          if (mounted) {
+            _voiceService.startListening();
+          }
+        });
+      }
+      _autoListenAfterSpeaking = false; // Reset after use
+    };
+  }
+  
+  void _handleVoiceInput(String text) async {
+    if (_isProcessingAI) return;
+    
+    // Add user message to chat
+    setState(() {
+      _messages.add(Message(
+        text: text,
+        isAI: false,
+        timestamp: DateTime.now(),
+      ));
+      // Remove quick actions if present
+      if (_messages.length > 1 && _messages[0].showQuickActions) {
+        _messages.removeAt(0);
+      }
+    });
+    _scrollToBottom();
+    
+    // Check if OpenAI is available
+    if (!_openAIService.hasApiKey) {
+      setState(() {
+        _messages.add(Message(
+          text: "Please set your OpenAI API key in settings to use AI features.",
+          isAI: true,
+          timestamp: DateTime.now(),
+        ));
+      });
+      _voiceService.speak("Please set your OpenAI API key in settings to use AI features.");
+      _scrollToBottom();
+      return;
+    }
+    
+    setState(() {
+      _isProcessingAI = true;
+    });
+    
+    // Build comprehensive context with full restaurant data for AI
+    String context = _buildFullContext();
+    
+    // Get AI response
+    final aiResponse = await _openAIService.getChatResponse(
+      userMessage: text,
+      context: context,
+      conversationHistory: _conversationHistory,
+    );
+    
+    setState(() {
+      _isProcessingAI = false;
+    });
+    
+    if (aiResponse != null) {
+      // Add AI response to chat
+      setState(() {
+        _messages.add(Message(
+          text: aiResponse,
+          isAI: true,
+          timestamp: DateTime.now(),
+        ));
+      });
+      
+      // Update conversation history (keep last 5 messages for context)
+      _conversationHistory.add({'role': 'user', 'content': text});
+      _conversationHistory.add({'role': 'assistant', 'content': aiResponse});
+      if (_conversationHistory.length > 10) {
+        _conversationHistory.removeRange(0, _conversationHistory.length - 10);
+      }
+      
+      // Try to extract actions from response
+      _processAIResponse(aiResponse, text);
+      
+      // Speak the response (always speak, even if it's an error message)
+      _voiceService.speak(aiResponse);
+      _scrollToBottom();
+    } else {
+      // Fallback to simple processing
+      _processGeneralVoiceInput(text);
+    }
+  }
+  
+  /// Build comprehensive context with full restaurant data for AI
+  String _buildFullContext() {
+    final allRestaurants = _restaurantsByCategory.values.expand((list) => list).toList();
+    
+    // Build detailed restaurant data in JSON-like format for AI
+    final restaurantsData = allRestaurants.map((r) {
+      final menuItems = _getMenuItems(r['name'] as String, r['items'] as List<String>);
+      return {
+        'name': r['name'],
+        'cuisine': r['cuisine'],
+        'rating': r['rating'],
+        'deliveryTime': r['deliveryTime'],
+        'category': _getRestaurantCategory(r['name'] as String),
+        'menuItems': menuItems.map((item) => {
+          'name': item['name'],
+          'description': item['description'],
+          'price': item['price'],
+          'category': item['category'],
+        }).toList(),
+      };
+    }).toList();
+    
+    String context = 'FULL RESTAURANT DATABASE:\n';
+    context += 'Total restaurants: ${allRestaurants.length}\n\n';
+    
+    // Group by category for better organization
+    for (var category in _restaurantsByCategory.keys) {
+      final restaurants = _restaurantsByCategory[category]!;
+      context += '$category (${restaurants.length} restaurants):\n';
+      for (var r in restaurants) {
+        final menuItems = _getMenuItems(r['name'] as String, r['items'] as List<String>);
+        context += '- ${r['name']} (${r['cuisine']}, Rating: ${r['rating']}, Delivery: ${r['deliveryTime']})\n';
+        context += '  Menu: ${menuItems.map((item) => '${item['name']} (\$${item['price']})').join(', ')}\n';
+      }
+      context += '\n';
+    }
+    
+    // Add current state
+    if (_selectedRestaurant != null) {
+      final restaurant = _getRestaurantByName(_selectedRestaurant!);
+      if (restaurant != null) {
+        final menuItems = _getMenuItems(_selectedRestaurant!, restaurant['items'] as List<String>);
+        context += '\nCURRENT STATE: User is viewing menu for $_selectedRestaurant.\n';
+        context += 'Menu items: ${menuItems.map((item) => '${item['name']} - \$${item['price']}').join(', ')}\n';
+      }
+    } else if (_showRestaurants) {
+      context += '\nCURRENT STATE: User is browsing restaurants list.\n';
+    } else {
+      context += '\nCURRENT STATE: User is in main chat view.\n';
+    }
+    
+    return context;
+  }
+  
+  /// Get category for a restaurant
+  String _getRestaurantCategory(String restaurantName) {
+    for (var entry in _restaurantsByCategory.entries) {
+      if (entry.value.any((r) => r['name'] == restaurantName)) {
+        return entry.key;
+      }
+    }
+    return 'Unknown';
+  }
+  
+  /// Process AI response and extract intelligent actions
+  void _processAIResponse(String aiResponse, String userInput) {
+    final lowerResponse = aiResponse.toLowerCase();
+    final lowerInput = userInput.toLowerCase();
+    
+    // Action 1: Show restaurants
+    if (_shouldShowRestaurants(lowerInput, lowerResponse)) {
+      setState(() {
+        _showRestaurants = true;
+        _selectedCategory = 'All'; // Reset to show all
+      });
+      return;
+    }
+    
+    // Action 2: Filter by category/cuisine
+    final categoryFilter = _extractCategoryFilter(lowerInput, lowerResponse);
+    if (categoryFilter != null) {
+      setState(() {
+        _showRestaurants = true;
+        _selectedCategory = categoryFilter;
+      });
+      return;
+    }
+    
+    // Action 3: Search by rating
+    if (_shouldFilterByRating(lowerInput, lowerResponse)) {
+      _filterByRating(lowerInput);
+      return;
+    }
+    
+    // Action 4: Search by delivery time
+    if (_shouldFilterByDeliveryTime(lowerInput, lowerResponse)) {
+      _filterByDeliveryTime(lowerInput);
+      return;
+    }
+    
+    // Action 5: Select restaurant by name
+    final restaurantName = _extractRestaurantName(lowerInput, lowerResponse);
+    if (restaurantName != null) {
+      _selectRestaurant(restaurantName);
+      return;
+    }
+    
+    // Action 6: Search by menu item
+    final menuItemSearch = _extractMenuItemSearch(lowerInput);
+    if (menuItemSearch != null) {
+      _searchByMenuItem(menuItemSearch);
+      return;
+    }
+  }
+  
+  bool _shouldShowRestaurants(String lowerInput, String lowerResponse) {
+    final triggers = ['browse', 'show restaurant', 'list restaurant', 'restaurants', 
+                     'show me', 'let me see', 'display'];
+    return triggers.any((trigger) => lowerInput.contains(trigger) || lowerResponse.contains(trigger));
+  }
+  
+  String? _extractCategoryFilter(String lowerInput, String lowerResponse) {
+    for (var category in _categories) {
+      if (category == 'All') continue;
+      final lowerCategory = category.toLowerCase();
+      if (lowerInput.contains(lowerCategory) || lowerResponse.contains(lowerCategory)) {
+        return category;
+      }
+    }
+    
+    // Also check for cuisine types
+    final cuisineMap = {
+      'lebanese': 'Lebanese',
+      'italian': 'Italian',
+      'japanese': 'Japanese',
+      'pizza': 'Pizza',
+      'burger': 'Burger',
+      'mediterranean': 'Mediterranean',
+    };
+    
+    for (var entry in cuisineMap.entries) {
+      if (lowerInput.contains(entry.key) || lowerResponse.contains(entry.key)) {
+        return entry.value;
+      }
+    }
+    
+    return null;
+  }
+  
+  bool _shouldFilterByRating(String lowerInput, String lowerResponse) {
+    return lowerInput.contains('rating') || lowerInput.contains('star') || 
+           lowerInput.contains('best') || lowerInput.contains('top rated') ||
+           lowerInput.contains('highest') || lowerResponse.contains('rating');
+  }
+  
+  void _filterByRating(String lowerInput) {
+    final allRestaurants = _restaurantsByCategory.values.expand((list) => list).toList();
+    
+    // Sort by rating
+    allRestaurants.sort((a, b) => (b['rating'] as double).compareTo(a['rating'] as double));
+    
+    // Filter based on input
+    List<Map<String, dynamic>> filtered = [];
+    if (lowerInput.contains('above') || lowerInput.contains('over')) {
+      // Extract number if mentioned
+      final numbers = RegExp(r'(\d+\.?\d*)').allMatches(lowerInput);
+      if (numbers.isNotEmpty) {
+        final minRating = double.tryParse(numbers.first.group(1) ?? '4.0') ?? 4.0;
+        filtered = allRestaurants.where((r) => (r['rating'] as double) >= minRating).toList();
+      } else {
+        filtered = allRestaurants.where((r) => (r['rating'] as double) >= 4.5).toList();
+      }
+    } else {
+      // Just show top rated
+      filtered = allRestaurants.take(5).toList();
+    }
+    
+    if (filtered.isNotEmpty) {
+      setState(() {
+        _showRestaurants = true;
+        _selectedCategory = 'All';
+        // Store filtered results (you might want to add a filtered restaurants list)
+      });
+    }
+  }
+  
+  bool _shouldFilterByDeliveryTime(String lowerInput, String lowerResponse) {
+    return lowerInput.contains('delivery') || lowerInput.contains('fast') || 
+           lowerInput.contains('quick') || lowerInput.contains('time') ||
+           lowerResponse.contains('delivery');
+  }
+  
+  void _filterByDeliveryTime(String lowerInput) {
+    setState(() {
+      _showRestaurants = true;
+      _selectedCategory = 'All';
+      // You can add delivery time filtering logic here
+    });
+  }
+  
+  String? _extractRestaurantName(String lowerInput, String lowerResponse) {
+    final allRestaurants = _restaurantsByCategory.values.expand((list) => list).toList();
+    
+    // Try exact match first
+    for (var restaurant in allRestaurants) {
+      final name = (restaurant['name'] as String).toLowerCase();
+      if (lowerInput.contains(name) || lowerResponse.contains(name)) {
+        return restaurant['name'] as String;
+      }
+    }
+    
+    // Try partial match
+    for (var restaurant in allRestaurants) {
+      final name = (restaurant['name'] as String).toLowerCase();
+      final words = name.split(' ');
+      for (var word in words) {
+        if (word.length > 3 && (lowerInput.contains(word) || lowerResponse.contains(word))) {
+          return restaurant['name'] as String;
+        }
+      }
+    }
+    
+    return null;
+  }
+  
+  String? _extractMenuItemSearch(String lowerInput) {
+    final menuKeywords = ['shawarma', 'pizza', 'burger', 'pasta', 'sushi', 
+                          'falafel', 'kebab', 'ramen', 'sashimi'];
+    for (var keyword in menuKeywords) {
+      if (lowerInput.contains(keyword)) {
+        return keyword;
+      }
+    }
+    return null;
+  }
+  
+  void _searchByMenuItem(String menuItem) {
+    final allRestaurants = _restaurantsByCategory.values.expand((list) => list).toList();
+    final matchingRestaurants = allRestaurants.where((r) {
+      final items = r['items'] as List<String>;
+      return items.any((item) => item.toLowerCase().contains(menuItem.toLowerCase()));
+    }).toList();
+    
+    if (matchingRestaurants.isNotEmpty) {
+      setState(() {
+        _showRestaurants = true;
+        _selectedCategory = 'All';
+        // You can store matching restaurants for display
+      });
+    }
+  }
+  
+  void _processGeneralVoiceInput(String text) {
+    final lowerText = text.toLowerCase();
+    
+    if (lowerText.contains('browse') || lowerText.contains('restaurant') || lowerText.contains('show restaurant')) {
+      setState(() {
+        _showRestaurants = true;
+      });
+      _voiceService.speak("Here are the restaurants. You can browse through them and tap on one to start ordering.");
+    } else if (lowerText.contains('order') || lowerText.contains('food') || lowerText.contains('hungry')) {
+      _voiceService.speak("I'd be happy to help you order! Would you like to browse restaurants or tell me what you're craving?");
+    } else {
+      _voiceService.speak("I'm here to help you order food. You can say 'browse restaurants' to see options, or tell me what you're craving.");
+    }
+  }
+  
+  void _processRestaurantSelection(String text) {
+    // Find restaurant by name
+    final allRestaurants = _restaurantsByCategory.values.expand((list) => list).toList();
+    final lowerText = text.toLowerCase();
+    
+    for (var restaurant in allRestaurants) {
+      final name = (restaurant['name'] as String).toLowerCase();
+      if (lowerText.contains(name)) {
+        _selectRestaurant(restaurant['name'] as String);
+        return;
+      }
+    }
+    
+    _voiceService.speak("I couldn't find that restaurant. Please tap on a restaurant from the list, or try saying the name again.");
+  }
+  
+  void _processOrderVoiceInput(String text) {
+    // Process order - for now just acknowledge
+    _voiceService.speak("Got it! You said: $text. I'll help you with that order from $_selectedRestaurant.");
+    // TODO: Process the actual order details
+  }
+  
+  void _showApiKeyDialog() {
+    final apiKeyController = TextEditingController();
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text(
+          'OpenAI API Key Required',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'To use AI features, please enter your OpenAI API key.',
+              style: TextStyle(color: Colors.grey),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: apiKeyController,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                labelText: 'API Key',
+                labelStyle: const TextStyle(color: Colors.grey),
+                enabledBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: Colors.grey[700]!),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: AppTheme.goldenYellow),
+                ),
+              ),
+              obscureText: true,
+            ),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: () {
+                // Open OpenAI API key page
+                // You can add url_launcher here if needed
+              },
+              child: const Text(
+                'Get API Key',
+                style: TextStyle(color: AppTheme.goldenYellow),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+            },
+            child: const Text(
+              'Skip',
+              style: TextStyle(color: Colors.grey),
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              if (apiKeyController.text.isNotEmpty) {
+                await _openAIService.setApiKey(apiKeyController.text.trim());
+                if (mounted) {
+                  Navigator.of(context).pop();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('API key saved successfully!'),
+                      backgroundColor: AppTheme.darkTealGreen,
+                    ),
+                  );
+                }
+              }
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.goldenYellow,
+              foregroundColor: Colors.black,
+            ),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
+    _voiceService.dispose();
     _scrollController.dispose();
     _cardAnimationController.dispose();
     super.dispose();
@@ -562,78 +1166,31 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  void _toggleListening() {
-    setState(() {
-      _isListening = !_isListening;
-      if (_isListening) {
-        _showRestaurants = false; // Switch to chat view when listening
-      }
-    });
-    
-    if (_isListening) {
-      // TODO: Start voice recognition
-      // Simulate user speaking
-      Future.delayed(const Duration(seconds: 2), () {
-        if (mounted) {
-          setState(() {
-            _isListening = false;
-            // Add user message
-            _messages.add(Message(
-              text: "I want to order shawarma",
-              isAI: false,
-              timestamp: DateTime.now(),
-              showQuickActions: false,
-            ));
-            _scrollToBottom();
-            
-            // AI suggests restaurants
-            Future.delayed(const Duration(milliseconds: 800), () {
-              if (mounted) {
-                setState(() {
-                  _messages.add(Message(
-                    text: "Great choice! 🥙 Here are restaurants that serve shawarma:\n\n📍 Shawarma King (4.9⭐)\n   ⏱️ 20-30 min • Middle Eastern\n\n📍 Mediterranean Delight (4.7⭐)\n   ⏱️ 15-25 min • Mediterranean\n\nWhich one would you like to order from?",
-                    isAI: true,
-                    timestamp: DateTime.now(),
-                    showQuickActions: false,
-                  ));
-                  _scrollToBottom();
-                });
-              }
-            });
-          });
-        }
-      });
+  void _toggleListening() async {
+    if (_voiceService.isListening) {
+      await _voiceService.stopListening();
     } else {
-      // TODO: Stop voice recognition
+      if (_voiceService.isSpeaking) {
+        await _voiceService.stopSpeaking();
+      }
+      await _voiceService.startListening();
     }
   }
 
   void _selectRestaurant(String restaurantName) {
-    // User selected a restaurant - switch to voice ordering
+    // User selected a restaurant - show menu
+    final restaurantData = _getRestaurantByName(restaurantName);
+    if (restaurantData == null) return;
+    
     setState(() {
       _showRestaurants = false;
-      _messages.add(Message(
-        text: "I'll order from $restaurantName",
-        isAI: false,
-        timestamp: DateTime.now(),
-        showQuickActions: false,
-      ));
-      _scrollToBottom();
-      
-      Future.delayed(const Duration(milliseconds: 600), () {
-        if (mounted) {
-          setState(() {
-            _messages.add(Message(
-              text: "Perfect! 🎉\n\nNow tell me what you'd like to order from $restaurantName. For example: \"I want 2 shawarma sandwiches\"",
-              isAI: true,
-              timestamp: DateTime.now(),
-              showQuickActions: false,
-            ));
-            _scrollToBottom();
-          });
-        }
-      });
+      _showMenu = true;
+      _selectedRestaurant = restaurantName;
+      _selectedRestaurantData = restaurantData;
     });
+    
+    // AI speaks the response
+    _voiceService.speak("Perfect! Here's the menu for $restaurantName. Browse through the items and tell me what you'd like to order.");
   }
 
   void _scrollToBottom() {
@@ -651,6 +1208,9 @@ class _HomeScreenState extends State<HomeScreen>
   bool _shouldShowBackButton() {
     // Show back button when viewing restaurants
     if (_showRestaurants) return true;
+    
+    // Show back button when viewing menu
+    if (_showMenu) return true;
     
     // Show back button when in chat view and there are messages beyond the initial quick actions
     if (_messages.isEmpty) return false;
@@ -678,15 +1238,35 @@ class _HomeScreenState extends State<HomeScreen>
                 icon: const Icon(Icons.arrow_back_ios, color: Colors.white70, size: 24),
                 onPressed: () {
                   setState(() {
-                    _showRestaurants = false;
-                    // Reset to initial state with only the two option cards
-                    _messages.clear();
-                    _messages.add(Message(
-                      text: "",
-                      isAI: true,
-                      timestamp: DateTime.now(),
-                      showQuickActions: true,
-                    ));
+                    if (_showMenu) {
+                      // Go back to restaurants list from menu
+                      _showMenu = false;
+                      _showRestaurants = true;
+                      _selectedRestaurant = null;
+                      _selectedRestaurantData = null;
+                    } else if (_showRestaurants) {
+                      // Go back to home from restaurants
+                      _showRestaurants = false;
+                      // Reset to initial state with only the two option cards
+                      _messages.clear();
+                      _messages.add(Message(
+                        text: "",
+                        isAI: true,
+                        timestamp: DateTime.now(),
+                        showQuickActions: true,
+                      ));
+                    } else {
+                      // Go back from chat view to initial state
+                      // Reset to initial state with only the two option cards
+                      _messages.clear();
+                      _conversationHistory.clear();
+                      _messages.add(Message(
+                        text: "",
+                        isAI: true,
+                        timestamp: DateTime.now(),
+                        showQuickActions: true,
+                      ));
+                    }
                   });
                 },
               )
@@ -754,13 +1334,9 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                 );
               } else if (value == 'settings') {
-                // TODO: Navigate to settings screen
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Settings screen coming soon'),
-                    backgroundColor: AppTheme.darkTealGreen,
-                  ),
-                );
+                _showApiKeyDialog();
+              } else if (value == 'api_key') {
+                _showApiKeyDialog();
               } else if (value == 'logout') {
                 _handleLogout(context);
               }
@@ -786,6 +1362,16 @@ class _HomeScreenState extends State<HomeScreen>
                   ],
                 ),
               ),
+              const PopupMenuItem<String>(
+                value: 'api_key',
+                child: Row(
+                  children: [
+                    Icon(Icons.key, color: AppTheme.goldenYellow, size: 20),
+                    SizedBox(width: 12),
+                    Text('OpenAI API Key', style: TextStyle(color: Colors.white)),
+                  ],
+                ),
+              ),
               const PopupMenuDivider(),
               const PopupMenuItem<String>(
                 value: 'logout',
@@ -807,11 +1393,13 @@ class _HomeScreenState extends State<HomeScreen>
           // Active Order Status Banner
           if (_activeOrder != null) _buildActiveOrderBanner(),
           
-          // Content Area - Restaurants or Chat
+          // Content Area - Restaurants, Menu, or Chat
           Expanded(
-            child: _showRestaurants
-                ? _buildRestaurantsList()
-                : _buildChatView(),
+            child: _showMenu
+                ? _buildMenuView()
+                : (_showRestaurants
+                    ? _buildRestaurantsList()
+                    : _buildChatView()),
           ),
         ],
       ),
@@ -947,6 +1535,222 @@ class _HomeScreenState extends State<HomeScreen>
           child: _buildRestaurantCard(restaurant),
         );
       },
+    );
+  }
+
+  Widget _buildMenuView() {
+    if (_selectedRestaurantData == null || _selectedRestaurant == null) {
+      return const Center(child: Text('No menu available'));
+    }
+    
+    final restaurant = _selectedRestaurantData!;
+    final menuItems = _getMenuItems(_selectedRestaurant!, restaurant['items'] as List<String>);
+    
+    return Column(
+      children: [
+        // Restaurant Header
+        Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                AppTheme.darkTealGreen.withValues(alpha: 0.3),
+                AppTheme.lightTeal.withValues(alpha: 0.2),
+              ],
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 70,
+                height: 70,
+                decoration: BoxDecoration(
+                  color: AppTheme.darkTealGreen.withValues(alpha: 0.3),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: AppTheme.lightTeal,
+                    width: 2,
+                  ),
+                ),
+                child: Icon(
+                  restaurant['icon'] as IconData,
+                  color: AppTheme.goldenYellow,
+                  size: 36,
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      restaurant['name'] as String,
+                      style: const TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      restaurant['cuisine'] as String,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey[400],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.star,
+                          color: AppTheme.goldenYellow,
+                          size: 16,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${restaurant['rating']}',
+                          style: const TextStyle(
+                            fontSize: 14,
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Icon(
+                          Icons.access_time,
+                          color: Colors.grey[500],
+                          size: 16,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          restaurant['deliveryTime'] as String,
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey[400],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        
+        // Menu Items List
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.all(16),
+            itemCount: menuItems.length,
+            itemBuilder: (context, index) {
+              final item = menuItems[index];
+              return Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.grey[900],
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: Colors.grey[800]!,
+                    width: 1,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            item['name'] as String,
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            item['description'] as String,
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Colors.grey[400],
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            '\$${(item['price'] as double).toStringAsFixed(2)}',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: AppTheme.goldenYellow,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Icon(
+                      Icons.add_circle_outline,
+                      color: AppTheme.goldenYellow,
+                      size: 28,
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+        
+        // Order Button
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.grey[900],
+            border: Border(
+              top: BorderSide(color: Colors.grey[800]!, width: 1),
+            ),
+          ),
+          child: SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: () {
+                // Start voice ordering
+                setState(() {
+                  _showMenu = false;
+                  _autoListenAfterSpeaking = true;
+                });
+                _voiceService.speak("Perfect! I'm ready to take your order from $_selectedRestaurant. What would you like to order? Just tell me what you'd like.");
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.goldenYellow,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.mic, size: 24),
+                  SizedBox(width: 8),
+                  Text(
+                    'Order with Voice',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -1588,25 +2392,9 @@ class _HomeScreenState extends State<HomeScreen>
                             HapticFeedback.mediumImpact();
                             setState(() {
                               _showRestaurants = true;
-                              _messages.add(Message(
-                                text: "Browse restaurants",
-                                isAI: false,
-                                timestamp: DateTime.now(),
-                              ));
-                              _scrollToBottom();
-                              Future.delayed(const Duration(milliseconds: 500), () {
-                                if (mounted) {
-                                  setState(() {
-                                    _messages.add(Message(
-                                      text: "Great! Browse through the restaurants above and tap on any restaurant to start ordering. 🍽️",
-                                      isAI: true,
-                                      timestamp: DateTime.now(),
-                                    ));
-                                    _scrollToBottom();
-                                  });
-                                }
-                              });
+                              _selectedRestaurant = null;
                             });
+                            _voiceService.speak("Here are the restaurants. Browse through them and tap on one to start ordering.");
                           },
                         ),
                       ),
@@ -1645,25 +2433,11 @@ class _HomeScreenState extends State<HomeScreen>
                           onTap: () {
                             HapticFeedback.mediumImpact();
                             setState(() {
-                              _messages.add(Message(
-                                text: "Speak with AI agent",
-                                isAI: false,
-                                timestamp: DateTime.now(),
-                              ));
-                              _scrollToBottom();
-                              Future.delayed(const Duration(milliseconds: 500), () {
-                                if (mounted) {
-                                  setState(() {
-                                    _messages.add(Message(
-                                      text: "Perfect! 🎤\n\nJust tell me what you'd like to eat, and I'll help you find the best restaurants and place your order. For example, say \"I want shawarma\" or \"I'm craving pizza\".",
-                                      isAI: true,
-                                      timestamp: DateTime.now(),
-                                    ));
-                                    _scrollToBottom();
-                                  });
-                                }
-                              });
+                              _showRestaurants = false;
+                              _selectedRestaurant = null;
+                              _autoListenAfterSpeaking = true;
                             });
+                            _voiceService.speak("Perfect! Just tell me what you'd like to eat, and I'll help you find the best restaurants and place your order. For example, say 'I want shawarma' or 'I'm craving pizza'.");
                           },
                         ),
                       ),
