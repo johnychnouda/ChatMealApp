@@ -209,13 +209,18 @@ class _ActionCardState extends State<_ActionCard>
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        widget.title,
-                        style: TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                          color: widget.textColor,
-                          letterSpacing: 0.3,
+                      FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          widget.title,
+                          style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                            color: widget.textColor,
+                            letterSpacing: 0.3,
+                          ),
+                          maxLines: 1,
                         ),
                       ),
                       const SizedBox(height: 6),
@@ -247,6 +252,47 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
+// Order status enum
+enum OrderStatus {
+  preparing,
+  onTheWay,
+  delivered,
+}
+
+// Order model
+class ActiveOrder {
+  final String id;
+  final String restaurantName;
+  final OrderStatus status;
+  final String estimatedTime;
+  final double total;
+
+  ActiveOrder({
+    required this.id,
+    required this.restaurantName,
+    required this.status,
+    required this.estimatedTime,
+    required this.total,
+  });
+}
+
+// Promotion model
+class Promotion {
+  final String id;
+  final String title;
+  final String description;
+  final String? code;
+  final Color color;
+
+  Promotion({
+    required this.id,
+    required this.title,
+    required this.description,
+    this.code,
+    required this.color,
+  });
+}
+
 class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
   bool _isListening = false;
@@ -258,6 +304,33 @@ class _HomeScreenState extends State<HomeScreen>
   late AnimationController _cardAnimationController;
   late Animation<double> _card1Animation;
   late Animation<double> _card2Animation;
+
+  // Active order state (set to null to hide, or provide an order to show)
+  ActiveOrder? _activeOrder;
+
+  // Promotions data
+  final List<Promotion> _promotions = [
+    Promotion(
+      id: '1',
+      title: '🎉 New User Special',
+      description: 'Get 20% off your first order! Use code: FIRST20',
+      code: 'FIRST20',
+      color: AppTheme.goldenYellow,
+    ),
+    Promotion(
+      id: '2',
+      title: '🍕 Weekend Deal',
+      description: 'Free delivery on orders over \$25 this weekend',
+      color: AppTheme.darkTealGreen,
+    ),
+    Promotion(
+      id: '3',
+      title: '⚡ Flash Sale',
+      description: '50% off on selected restaurants - Limited time!',
+      color: AppTheme.goldenOrange,
+    ),
+  ];
+  int _currentPromotionIndex = 0;
 
   // Sample restaurants grouped by category
   final Map<String, List<Map<String, dynamic>>> _restaurantsByCategory = {
@@ -396,6 +469,19 @@ class _HomeScreenState extends State<HomeScreen>
     return _restaurantsByCategory[_selectedCategory] ?? [];
   }
 
+  // Get recommended restaurants (top rated)
+  List<Map<String, dynamic>> get _recommendedRestaurants {
+    final allRestaurants = _restaurantsByCategory.values
+        .expand((list) => list)
+        .toList();
+    
+    // Sort by rating and return top 3
+    allRestaurants.sort((a, b) => 
+        (b['rating'] as double).compareTo(a['rating'] as double));
+    
+    return allRestaurants.take(3).toList();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -407,6 +493,29 @@ class _HomeScreenState extends State<HomeScreen>
       showQuickActions: true,
     ));
     _setupCardAnimations();
+    
+    // Rotate promotions every 5 seconds
+    _startPromotionRotation();
+    
+    // Example: Set an active order (comment out to hide the banner)
+    _activeOrder = ActiveOrder(
+      id: 'ORD-12345',
+      restaurantName: 'Shawarma King',
+      status: OrderStatus.onTheWay,
+      estimatedTime: '15 min',
+      total: 24.99,
+    );
+  }
+
+  void _startPromotionRotation() {
+    Future.delayed(const Duration(seconds: 5), () {
+      if (mounted && _promotions.length > 1) {
+        setState(() {
+          _currentPromotionIndex = (_currentPromotionIndex + 1) % _promotions.length;
+        });
+        _startPromotionRotation();
+      }
+    });
   }
 
   void _setupCardAnimations() {
@@ -695,6 +804,9 @@ class _HomeScreenState extends State<HomeScreen>
       ),
       body: Column(
         children: [
+          // Active Order Status Banner
+          if (_activeOrder != null) _buildActiveOrderBanner(),
+          
           // Content Area - Restaurants or Chat
           Expanded(
             child: _showRestaurants
@@ -945,6 +1057,415 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  Widget _buildActiveOrderBanner() {
+    if (_activeOrder == null) return const SizedBox.shrink();
+
+    final order = _activeOrder!;
+    IconData statusIcon;
+    String statusText;
+    Color statusColor;
+
+    switch (order.status) {
+      case OrderStatus.preparing:
+        statusIcon = Icons.restaurant_menu;
+        statusText = 'Preparing your order';
+        statusColor = AppTheme.goldenYellow;
+        break;
+      case OrderStatus.onTheWay:
+        statusIcon = Icons.delivery_dining;
+        statusText = 'On the way';
+        statusColor = AppTheme.darkTealGreen;
+        break;
+      case OrderStatus.delivered:
+        statusIcon = Icons.check_circle;
+        statusText = 'Delivered';
+        statusColor = Colors.green;
+        break;
+    }
+
+    return Container(
+      margin: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            statusColor.withValues(alpha: 0.2),
+            statusColor.withValues(alpha: 0.1),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: statusColor.withValues(alpha: 0.5),
+          width: 1.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: statusColor.withValues(alpha: 0.3),
+            blurRadius: 12,
+            spreadRadius: 0,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () {
+            // TODO: Navigate to order tracking screen
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Tracking order ${order.id}'),
+                backgroundColor: AppTheme.darkTealGreen,
+              ),
+            );
+          },
+          borderRadius: BorderRadius.circular(16),
+          child: Row(
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: statusColor.withValues(alpha: 0.3),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: statusColor,
+                    width: 2,
+                  ),
+                ),
+                child: Icon(
+                  statusIcon,
+                  color: statusColor,
+                  size: 24,
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      statusText,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: statusColor,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${order.restaurantName} • ETA: ${order.estimatedTime}',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey[300],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    '\$${order.total.toStringAsFixed(2)}',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Icon(
+                    Icons.arrow_forward_ios,
+                    color: statusColor,
+                    size: 16,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPromotionsBanner() {
+    if (_promotions.isEmpty) return const SizedBox.shrink();
+
+    final promotion = _promotions[_currentPromotionIndex];
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () {
+            HapticFeedback.lightImpact();
+            // TODO: Navigate to promotions screen or apply code
+            if (promotion.code != null) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Promo code ${promotion.code} copied!'),
+                  backgroundColor: AppTheme.darkTealGreen,
+                  action: SnackBarAction(
+                    label: 'Apply',
+                    textColor: AppTheme.goldenYellow,
+                    onPressed: () {},
+                  ),
+                ),
+              );
+            }
+          },
+          borderRadius: BorderRadius.circular(16),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  promotion.color.withValues(alpha: 0.25),
+                  promotion.color.withValues(alpha: 0.15),
+                ],
+              ),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: promotion.color.withValues(alpha: 0.4),
+                width: 1.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: promotion.color.withValues(alpha: 0.2),
+                  blurRadius: 8,
+                  spreadRadius: 0,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: promotion.color.withValues(alpha: 0.3),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(
+                    Icons.local_offer,
+                    color: promotion.color,
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        promotion.title,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          color: promotion.color,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        promotion.description,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey[300],
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                if (_promotions.length > 1)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: List.generate(
+                      _promotions.length,
+                      (index) => Container(
+                        margin: const EdgeInsets.only(left: 4),
+                        width: 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: index == _currentPromotionIndex
+                              ? promotion.color
+                              : promotion.color.withValues(alpha: 0.3),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRestaurantRecommendations() {
+    final recommendations = _recommendedRestaurants;
+    if (recommendations.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+          child: Row(
+            children: [
+              Icon(
+                Icons.trending_up,
+                color: AppTheme.goldenYellow,
+                size: 18,
+              ),
+              const SizedBox(width: 6),
+              ShaderMask(
+                shaderCallback: (bounds) => LinearGradient(
+                  colors: [
+                    AppTheme.goldenYellow,
+                    AppTheme.goldenOrange,
+                  ],
+                ).createShader(bounds),
+                child: const Text(
+                  'Popular Near You',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 6),
+        SizedBox(
+          height: 110,
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            itemCount: recommendations.length,
+            itemBuilder: (context, index) {
+              final restaurant = recommendations[index];
+              return Container(
+                width: 240,
+                margin: const EdgeInsets.only(right: 10),
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: () => _selectRestaurant(restaurant['name'] as String),
+                    borderRadius: BorderRadius.circular(16),
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.grey[900],
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: AppTheme.goldenYellow.withValues(alpha: 0.3),
+                          width: 1.5,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppTheme.goldenYellow.withValues(alpha: 0.1),
+                            blurRadius: 8,
+                            spreadRadius: 0,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 50,
+                            height: 50,
+                            decoration: BoxDecoration(
+                              color: AppTheme.goldenYellow.withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: AppTheme.goldenYellow.withValues(alpha: 0.5),
+                                width: 1,
+                              ),
+                            ),
+                            child: Icon(
+                              restaurant['icon'] as IconData,
+                              color: AppTheme.goldenYellow,
+                              size: 24,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(
+                                  restaurant['name'] as String,
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                const SizedBox(height: 3),
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.star,
+                                      color: AppTheme.goldenYellow,
+                                      size: 14,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      '${restaurant['rating']}',
+                                      style: const TextStyle(
+                                        fontSize: 13,
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Icon(
+                                      Icons.access_time,
+                                      color: Colors.grey[500],
+                                      size: 14,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      restaurant['deliveryTime'] as String,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.grey[400],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 8),
+      ],
+    );
+  }
+
   Widget _buildChatView() {
     // Check if we should show only the quick actions (initial state)
     final hasQuickActionsOnly = _messages.length == 1 && 
@@ -964,13 +1485,21 @@ class _HomeScreenState extends State<HomeScreen>
         ),
       ),
       child: hasQuickActionsOnly
-          ? ListView.builder(
-              controller: _scrollController,
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-              itemCount: 1,
-              itemBuilder: (context, index) {
-                return _buildMessageBubble(_messages[0]);
-              },
+          ? SingleChildScrollView(
+              physics: const NeverScrollableScrollPhysics(),
+              child: Column(
+                children: [
+                  // Main action cards
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: _buildMessageBubble(_messages[0]),
+                  ),
+                  // Restaurant Recommendations (after action cards)
+                  _buildRestaurantRecommendations(),
+                  // Promotions Banner (at the bottom)
+                  _buildPromotionsBanner(),
+                ],
+              ),
             )
           : ListView.builder(
               controller: _scrollController,
@@ -992,8 +1521,9 @@ class _HomeScreenState extends State<HomeScreen>
     // Special case: Show buttons only without chat bubble styling
     if (message.showQuickActions && message.isAI && message.text.isEmpty) {
       return SingleChildScrollView(
+        physics: const NeverScrollableScrollPhysics(),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 40),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
           child: Column(
             children: [
               // Welcome Hero Section
@@ -1015,7 +1545,7 @@ class _HomeScreenState extends State<HomeScreen>
                       child: const Text(
                         'What would you like to do?',
                         style: TextStyle(
-                          fontSize: 28,
+                          fontSize: 24,
                           fontWeight: FontWeight.bold,
                           color: Colors.white,
                           letterSpacing: 0.5,
@@ -1027,7 +1557,7 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                 ],
               ),
-              const SizedBox(height: 48),
+              const SizedBox(height: 24),
               
               // Browse Restaurants Card
               AnimatedBuilder(
@@ -1085,7 +1615,7 @@ class _HomeScreenState extends State<HomeScreen>
                 },
               ),
               
-              const SizedBox(height: 20),
+              const SizedBox(height: 12),
               
               // Speak with AI Card
               AnimatedBuilder(

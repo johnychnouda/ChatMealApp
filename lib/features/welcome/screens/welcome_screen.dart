@@ -160,16 +160,26 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                   ),
                 ),
                 const SizedBox(height: 16),
-                // ChatMeal with logo color
-                const Text(
-                  'ChatMeal',
-                  style: TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.bold,
-                    color: AppTheme.darkTealGreen,
-                    letterSpacing: 0.5,
+                // ChatMeal with gradient from teal green to yellow
+                ShaderMask(
+                  shaderCallback: (bounds) => const LinearGradient(
+                    colors: [
+                      AppTheme.lightTeal,
+                      AppTheme.goldenYellow,
+                    ],
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                  ).createShader(bounds),
+                  child: const Text(
+                    'ChatMeal',
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      letterSpacing: 0.5,
+                    ),
+                    textAlign: TextAlign.center,
                   ),
-                  textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 16),
                 // Subtitle
@@ -236,15 +246,25 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                   ),
                 ),
                 const SizedBox(height: 24),
-                // Developer name and version
-                Text(
-                  '${AppConstants.developerName} • v${AppConstants.appVersion}',
-                  style: TextStyle(
-                    color: Colors.grey[700],
-                    fontSize: 11,
-                    letterSpacing: 0.3,
+                // Developer name and version with gradient colors matching logo
+                ShaderMask(
+                  shaderCallback: (bounds) => const LinearGradient(
+                    colors: [
+                      AppTheme.lightTeal,
+                      AppTheme.goldenYellow,
+                    ],
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                  ).createShader(bounds),
+                  child: Text(
+                    '${AppConstants.developerName} • v${AppConstants.appVersion}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      letterSpacing: 0.3,
+                    ),
+                    textAlign: TextAlign.center,
                   ),
-                  textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 16),
                 // Privacy and Terms links
@@ -262,7 +282,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                         'Privacy Policy',
                         style: TextStyle(
                           color: Colors.grey[600],
-                          fontSize: 12,
+                          fontSize: 15,
                         ),
                       ),
                     ),
@@ -270,7 +290,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                       ' • ',
                       style: TextStyle(
                         color: Colors.grey[600],
-                        fontSize: 12,
+                        fontSize: 15,
                       ),
                     ),
                     TextButton(
@@ -284,7 +304,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                         'Terms of Service',
                         style: TextStyle(
                           color: Colors.grey[600],
-                          fontSize: 12,
+                          fontSize: 15,
                         ),
                       ),
                     ),
