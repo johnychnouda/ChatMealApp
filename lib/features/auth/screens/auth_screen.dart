@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:go_router/go_router.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/services/auth_service.dart';
 
@@ -110,19 +111,24 @@ class _AuthScreenState extends State<AuthScreen> {
       });
 
       try {
-        await Future.delayed(const Duration(seconds: 1));
-        
         final email = _signupEmailController.text.trim();
+        final password = _signupPasswordController.text;
         
-        if (email.isNotEmpty && _signupPasswordController.text.isNotEmpty) {
-          // Register the user
-          await _authService.registerUser(email);
+        if (email.isNotEmpty && password.isNotEmpty) {
+          // Sign up with Firebase Auth
+          final userId = await _authService.signUpWithEmailPassword(email, password);
           
-          // Login the user
-          await _authService.login(email);
-          
-          if (mounted) {
+          if (userId != null && mounted) {
             context.go('/home');
+          } else {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Signup failed. Please try again.'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+            }
           }
         } else {
           if (mounted) {
@@ -134,11 +140,29 @@ class _AuthScreenState extends State<AuthScreen> {
             );
           }
         }
+      } on FirebaseAuthException catch (e) {
+        String errorMessage = 'Signup failed';
+        if (e.code == 'weak-password') {
+          errorMessage = 'Password is too weak. Please use a stronger password.';
+        } else if (e.code == 'email-already-in-use') {
+          errorMessage = 'An account already exists with this email. Please login instead.';
+        } else if (e.code == 'invalid-email') {
+          errorMessage = 'Invalid email address.';
+        }
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(errorMessage),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Signup failed: $e'),
+              content: Text('Signup failed: ${e.toString()}'),
               backgroundColor: Colors.red,
             ),
           );
@@ -376,31 +400,24 @@ class _AuthScreenState extends State<AuthScreen> {
       });
 
       try {
-        await Future.delayed(const Duration(seconds: 1));
-        
         final email = _loginEmailController.text.trim();
+        final password = _loginPasswordController.text;
         
-        if (email.isNotEmpty && _loginPasswordController.text.isNotEmpty) {
-          // Check if user is registered
-          final isRegistered = await _authService.isUserRegistered(email);
+        if (email.isNotEmpty && password.isNotEmpty) {
+          // Sign in with Firebase Auth
+          final userId = await _authService.signInWithEmailPassword(email, password);
           
-          if (!isRegistered) {
+          if (userId != null && mounted) {
+            context.go('/home');
+          } else {
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content: Text('User not found. Please sign up first.'),
+                  content: Text('Login failed. Please check your credentials.'),
                   backgroundColor: Colors.red,
                 ),
               );
             }
-            return;
-          }
-          
-          // Login the user
-          await _authService.login(email);
-          
-          if (mounted) {
-            context.go('/home');
           }
         } else {
           if (mounted) {
@@ -412,11 +429,33 @@ class _AuthScreenState extends State<AuthScreen> {
             );
           }
         }
+      } on FirebaseAuthException catch (e) {
+        String errorMessage = 'Login failed';
+        if (e.code == 'user-not-found') {
+          errorMessage = 'No user found with this email. Please sign up first.';
+        } else if (e.code == 'wrong-password') {
+          errorMessage = 'Wrong password. Please try again.';
+        } else if (e.code == 'invalid-email') {
+          errorMessage = 'Invalid email address.';
+        } else if (e.code == 'user-disabled') {
+          errorMessage = 'This account has been disabled.';
+        } else if (e.code == 'too-many-requests') {
+          errorMessage = 'Too many failed attempts. Please try again later.';
+        }
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(errorMessage),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Login failed: $e'),
+              content: Text('Login failed: ${e.toString()}'),
               backgroundColor: Colors.red,
             ),
           );

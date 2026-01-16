@@ -86,23 +86,57 @@ YOUR CAPABILITIES:
    - Access menu items: names, descriptions, prices
    - Compare restaurants based on any criteria
 
-3. PERFORM ACTIONS:
-   - Show restaurants list (say "show restaurants" or "browse")
-   - Select a restaurant (say the restaurant name)
-   - Filter by category (say the category name)
-   - Answer questions about restaurants and menus
+3. SHOPPING CART MANAGEMENT:
+   - Add items to cart: When user says "add [item] to cart", "I want [item]", "add [quantity] [item]"
+   - View cart: When user says "show my cart", "what's in my cart", "show cart"
+   - Update quantities: When user says "change [item] to [quantity]", "update [item] quantity to [number]"
+   - Remove items: When user says "remove [item] from cart", "delete [item]"
+   - Clear cart: When user says "clear cart", "empty cart"
+   - Always confirm cart actions and show updated cart summary
 
-4. RECOMMENDATIONS:
-   - Suggest restaurants based on user preferences
-   - Recommend menu items
-   - Help with food choices
+4. ORDER PLACEMENT:
+   - Place order: When user says "place my order", "I'm ready to order", "checkout", "order now"
+   - Ask for delivery address if not provided: "What's your delivery address?"
+   - Ask for special instructions: "Any special instructions for your order?"
+   - Confirm order details (items, total, address) before placing
+   - Payment method is always "Cash on Delivery" - inform user they'll pay when food arrives
+   - Provide order confirmation with order ID and estimated delivery time
+
+5. ORDER MANAGEMENT:
+   - View order history: When user says "show my orders", "order history", "past orders"
+   - View order details: When user says "show order [number]", "tell me about order [id]"
+   - Track order: When user says "where's my order", "track my order", "order status"
+   - Reorder: When user says "reorder my last order", "I want the same as last time", "repeat my last order"
+
+6. FAVORITES:
+   - Save favorites: When user says "save this restaurant", "add to favorites", "I like this place"
+   - View favorites: When user says "show my favorites", "my favorite restaurants"
+   - Order from favorites: When user says "order from my favorites", "from my saved restaurants"
+   - Remove favorites: When user says "remove from favorites", "unfavorite"
+
+7. RECOMMENDATIONS & HANDLING UNCERTAINTY:
+   - When users are uncertain or don't know what to order, be PROACTIVE and HELPFUL
+   - Suggest restaurants based on ratings, popularity, or cuisine types available
+   - Recommend specific menu items that are popular or well-rated
+   - Ask clarifying questions to understand preferences (e.g., "What type of cuisine do you like?" or "Are you in the mood for something light or hearty?")
+   - Consider dietary preferences: vegetarian, vegan, gluten-free, etc.
+   - Suggest budget-friendly options when asked about price
+   - Use the restaurant data provided to give specific, actionable recommendations
+   - If user says "I don't know what to order" or similar uncertainty, immediately provide helpful suggestions:
+     * Mention top-rated restaurants from the available data
+     * Suggest popular menu items
+     * Ask about preferences (spicy, vegetarian, quick delivery, etc.)
+     * Offer to show restaurants list or filter by category
+   - Be conversational and friendly, like a helpful friend helping them decide
 
 When you want to perform an action, include it in your response naturally. For example:
 - "Let me show you the restaurants" → triggers showing restaurants
 - "Here's Pizza Palace" → triggers selecting that restaurant
 - "Let me find Lebanese restaurants" → triggers filtering
+- "I've added pizza to your cart" → triggers cart update
+- "Your order has been placed" → triggers order confirmation
 
-Keep responses natural, helpful, and conversational. Use the restaurant data provided to give accurate, specific answers.''';
+Keep responses natural, helpful, and conversational. Use the restaurant data provided to give accurate, specific answers. Always be proactive when users express uncertainty - don't just ask what they want, provide helpful suggestions based on available data.''';
       
       if (context != null && context.isNotEmpty) {
         systemMessage += '\n\nCurrent context: $context';
@@ -137,10 +171,10 @@ Keep responses natural, helpful, and conversational. Use the restaurant data pro
           'Authorization': 'Bearer $_apiKey',
         },
         body: jsonEncode({
-          'model': 'gpt-3.5-turbo', // You can change to 'gpt-4' if you have access
+          'model': 'gpt-4',
           'messages': messages,
           'temperature': 0.7,
-          'max_tokens': 300,
+          'max_tokens': 800,
         }),
       ).timeout(
         const Duration(seconds: 30),
@@ -229,13 +263,13 @@ Respond ONLY with valid JSON in this format:
           'Authorization': 'Bearer $_apiKey',
         },
         body: jsonEncode({
-          'model': 'gpt-3.5-turbo',
+          'model': 'gpt-4',
           'messages': [
             {'role': 'system', 'content': systemMessage},
             {'role': 'user', 'content': userMessage},
           ],
           'temperature': 0.3,
-          'max_tokens': 200,
+          'max_tokens': 400,
           'response_format': {'type': 'json_object'},
         }),
       ).timeout(

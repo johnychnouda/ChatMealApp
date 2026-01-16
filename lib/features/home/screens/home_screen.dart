@@ -1,11 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:provider/provider.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/services/auth_service.dart';
 import '../../../core/services/voice_service.dart';
 import '../../../core/services/openai_service.dart';
+import '../../../core/services/firebase_service.dart';
+import '../../../core/services/subscription_service.dart';
+import '../../../core/services/cart_service.dart';
+import '../../../core/services/order_service.dart';
+import '../../../core/services/favorites_service.dart';
+import '../../../core/services/notification_service.dart';
+import '../../../core/services/theme_service.dart';
 import '../../../core/constants/app_constants.dart';
+import '../../../core/models/order.dart';
+import '../../../core/models/cart_item.dart';
 
 class Message {
   final String text;
@@ -78,7 +89,8 @@ class _ActionCardState extends State<_ActionCard>
   void _handleTapUp(TapUpDetails details) {
     setState(() => _isPressed = false);
     _pressController.reverse();
-    widget.onTap();
+    // Voice-only mode: No tap actions, users must speak to AI
+    // widget.onTap(); // Removed for voice-only interface
   }
 
   void _handleTapCancel() {
@@ -89,13 +101,8 @@ class _ActionCardState extends State<_ActionCard>
   @override
   Widget build(BuildContext context) {
     return Semantics(
-      button: true,
       label: '${widget.title}. ${widget.description}',
-      child: GestureDetector(
-        onTapDown: _handleTapDown,
-        onTapUp: _handleTapUp,
-        onTapCancel: _handleTapCancel,
-        child: ScaleTransition(
+      child: ScaleTransition(
           scale: _scaleAnimation,
           child: Container(
             width: double.infinity,
@@ -242,8 +249,7 @@ class _ActionCardState extends State<_ActionCard>
             ),
           ),
         ),
-      ),
-    );
+      );
   }
 }
 
@@ -285,6 +291,9 @@ class Promotion {
   final String description;
   final String? code;
   final Color color;
+  final DateTime? expiryDate;
+  final int? maxUses;
+  final int currentUses;
 
   Promotion({
     required this.id,
@@ -292,7 +301,32 @@ class Promotion {
     required this.description,
     this.code,
     required this.color,
+    this.expiryDate,
+    this.maxUses,
+    this.currentUses = 0,
   });
+
+  bool get isExpired {
+    if (expiryDate == null) return false;
+    return DateTime.now().isAfter(expiryDate!);
+  }
+
+  bool get hasUsesLeft {
+    if (maxUses == null) return true;
+    return currentUses < maxUses!;
+  }
+
+  int? get remainingUses {
+    if (maxUses == null) return null;
+    return (maxUses! - currentUses).clamp(0, maxUses!);
+  }
+
+  Duration? get timeRemaining {
+    if (expiryDate == null) return null;
+    final now = DateTime.now();
+    if (now.isAfter(expiryDate!)) return Duration.zero;
+    return expiryDate!.difference(now);
+  }
 }
 
 class _HomeScreenState extends State<HomeScreen>
@@ -304,12 +338,23 @@ class _HomeScreenState extends State<HomeScreen>
   final List<Message> _messages = [];
   late VoiceService _voiceService;
   late OpenAIService _openAIService;
+  final FirebaseService _firebaseService = FirebaseService();
+  final SubscriptionService _subscriptionService = SubscriptionService();
+  late CartService _cartService;
+  late OrderService _orderService;
+  late FavoritesService _favoritesService;
+  final NotificationService _notificationService = NotificationService();
   String? _selectedRestaurant;
   Map<String, dynamic>? _selectedRestaurantData; // Store full restaurant data
   bool _autoListenAfterSpeaking = false;
   bool _isProcessingAI = false;
   // Conversation history for context
   final List<Map<String, String>> _conversationHistory = [];
+  
+  // Firebase data
+  List<Map<String, dynamic>> _firestoreRestaurants = [];
+  bool _isLoadingRestaurants = true;
+  bool _hasActiveSubscription = false;
 
   String _selectedCategory = 'All';
   late AnimationController _cardAnimationController;
@@ -327,24 +372,37 @@ class _HomeScreenState extends State<HomeScreen>
       description: 'Get 20% off your first order! Use code: FIRST20',
       code: 'FIRST20',
       color: AppTheme.goldenYellow,
+      expiryDate: DateTime.now().add(const Duration(days: 7)),
+      maxUses: 1,
+      currentUses: 0,
     ),
     Promotion(
       id: '2',
       title: '🍕 Weekend Deal',
       description: 'Free delivery on orders over \$25 this weekend',
       color: AppTheme.darkTealGreen,
+      expiryDate: DateTime.now().add(const Duration(days: 2)),
+      maxUses: 100,
+      currentUses: 45,
     ),
     Promotion(
       id: '3',
       title: '⚡ Flash Sale',
       description: '50% off on selected restaurants - Limited time!',
       color: AppTheme.goldenOrange,
+      expiryDate: DateTime.now().add(const Duration(hours: 12)),
+      maxUses: 50,
+      currentUses: 32,
     ),
   ];
   int _currentPromotionIndex = 0;
 
-  // Sample restaurants grouped by category
-  final Map<String, List<Map<String, dynamic>>> _restaurantsByCategory = {
+
+  // Restaurants from Firestore (will be populated)
+  Map<String, List<Map<String, dynamic>>> _restaurantsByCategory = {};
+  
+  // Sample restaurants grouped by category (fallback if Firestore is empty)
+  final Map<String, List<Map<String, dynamic>>> _fallbackRestaurants = {
     'Pizza': [
       {
         'name': 'Pizza Palace',
@@ -471,9 +529,20 @@ class _HomeScreenState extends State<HomeScreen>
     ],
   };
 
-  List<String> get _categories => ['All', ..._restaurantsByCategory.keys.toList()];
+  List<String> get _categories {
+    final cats = _restaurantsByCategory.keys.toList();
+    return ['All', ...cats];
+  }
   
   List<Map<String, dynamic>> get _filteredRestaurants {
+    if (_restaurantsByCategory.isEmpty) {
+      // Use fallback if Firestore data not loaded yet
+      if (_selectedCategory == 'All') {
+        return _fallbackRestaurants.values.expand((list) => list).toList();
+      }
+      return _fallbackRestaurants[_selectedCategory] ?? [];
+    }
+    
     if (_selectedCategory == 'All') {
       return _restaurantsByCategory.values.expand((list) => list).toList();
     }
@@ -482,90 +551,121 @@ class _HomeScreenState extends State<HomeScreen>
 
   // Get recommended restaurants (top rated)
   List<Map<String, dynamic>> get _recommendedRestaurants {
-    final allRestaurants = _restaurantsByCategory.values
-        .expand((list) => list)
-        .toList();
+    final allRestaurants = _restaurantsByCategory.isEmpty
+        ? _fallbackRestaurants.values.expand((list) => list).toList()
+        : _restaurantsByCategory.values.expand((list) => list).toList();
+    
+    if (allRestaurants.isEmpty) return [];
     
     // Sort by rating and return top 3
-    allRestaurants.sort((a, b) => 
-        (b['rating'] as double).compareTo(a['rating'] as double));
+    allRestaurants.sort((a, b) {
+      final ratingA = (a['rating'] as num?)?.toDouble() ?? 0.0;
+      final ratingB = (b['rating'] as num?)?.toDouble() ?? 0.0;
+      return ratingB.compareTo(ratingA);
+    });
     
     return allRestaurants.take(3).toList();
   }
   
   // Get restaurant data by name
   Map<String, dynamic>? _getRestaurantByName(String name) {
-    final allRestaurants = _restaurantsByCategory.values
-        .expand((list) => list)
-        .toList();
+    final allRestaurants = _restaurantsByCategory.isEmpty
+        ? _fallbackRestaurants.values.expand((list) => list).toList()
+        : _restaurantsByCategory.values.expand((list) => list).toList();
     try {
       return allRestaurants.firstWhere(
-        (restaurant) => restaurant['name'] == name,
+        (restaurant) => (restaurant['name'] as String?)?.toLowerCase() == name.toLowerCase(),
       );
     } catch (e) {
       return null;
     }
   }
   
-  // Get menu items for a restaurant (expand simple items list to full menu)
-  List<Map<String, dynamic>> _getMenuItems(String restaurantName, List<String> itemCategories) {
-    // Generate menu items based on categories
-    final menuItems = <Map<String, dynamic>>[];
+  // Get menu items for a restaurant (from Firestore or fallback)
+  Future<List<Map<String, dynamic>>> _getMenuItems(String restaurantId, String restaurantName) async {
+    // Try to get menu items from Firestore first
+    final menuItems = await _firebaseService.getRestaurantMenuItems(restaurantId);
+    if (menuItems.isNotEmpty) {
+      return menuItems;
+    }
     
+    // Fallback: Generate menu items based on restaurant name/category
+    final restaurant = _getRestaurantByName(restaurantName);
+    if (restaurant == null) return [];
+    
+    final itemCategories = restaurant['items'] as List<dynamic>?;
+    if (itemCategories == null) return [];
+    
+    final generatedItems = <Map<String, dynamic>>[];
     for (var category in itemCategories) {
-      switch (category.toLowerCase()) {
+      final categoryStr = category.toString().toLowerCase();
+      switch (categoryStr) {
         case 'pizza':
-          menuItems.addAll([
+          generatedItems.addAll([
             {'name': 'Margherita Pizza', 'description': 'Classic tomato, mozzarella, and basil', 'price': 12.99, 'category': 'Pizza'},
             {'name': 'Pepperoni Pizza', 'description': 'Pepperoni, mozzarella, and tomato sauce', 'price': 14.99, 'category': 'Pizza'},
             {'name': 'BBQ Chicken Pizza', 'description': 'BBQ chicken, red onions, and cilantro', 'price': 16.99, 'category': 'Pizza'},
           ]);
           break;
         case 'shawarma':
-          menuItems.addAll([
+          generatedItems.addAll([
             {'name': 'Chicken Shawarma Wrap', 'description': 'Tender chicken with tahini and pickles', 'price': 8.99, 'category': 'Shawarma'},
             {'name': 'Beef Shawarma Plate', 'description': 'Spiced beef with rice and salad', 'price': 14.99, 'category': 'Shawarma'},
             {'name': 'Shawarma Sandwich', 'description': 'Chicken or beef shawarma in pita bread', 'price': 7.99, 'category': 'Shawarma'},
           ]);
           break;
         case 'burgers':
-          menuItems.addAll([
+          generatedItems.addAll([
             {'name': 'Classic Burger', 'description': 'Beef patty, lettuce, tomato, and special sauce', 'price': 9.99, 'category': 'Burgers'},
             {'name': 'Cheeseburger', 'description': 'Beef patty with cheese, pickles, and onions', 'price': 10.99, 'category': 'Burgers'},
             {'name': 'BBQ Burger', 'description': 'Beef patty with BBQ sauce and crispy onions', 'price': 11.99, 'category': 'Burgers'},
           ]);
           break;
         case 'pasta':
-          menuItems.addAll([
+          generatedItems.addAll([
             {'name': 'Spaghetti Carbonara', 'description': 'Creamy pasta with bacon and parmesan', 'price': 13.99, 'category': 'Pasta'},
             {'name': 'Fettuccine Alfredo', 'description': 'Creamy alfredo sauce with parmesan', 'price': 12.99, 'category': 'Pasta'},
             {'name': 'Penne Arrabbiata', 'description': 'Spicy tomato sauce with garlic', 'price': 11.99, 'category': 'Pasta'},
           ]);
           break;
         case 'sushi':
-          menuItems.addAll([
+          generatedItems.addAll([
             {'name': 'Salmon Roll', 'description': 'Fresh salmon with rice and nori', 'price': 8.99, 'category': 'Sushi'},
             {'name': 'California Roll', 'description': 'Crab, avocado, and cucumber', 'price': 7.99, 'category': 'Sushi'},
             {'name': 'Dragon Roll', 'description': 'Eel and avocado topped with eel sauce', 'price': 12.99, 'category': 'Sushi'},
           ]);
           break;
         default:
-          // Generic items for other categories
-          menuItems.add({
-            'name': category,
-            'description': 'Delicious $category',
+          generatedItems.add({
+            'name': category.toString(),
+            'description': 'Delicious ${category.toString()}',
             'price': 9.99,
-            'category': category,
+            'category': category.toString(),
           });
       }
     }
     
-    return menuItems;
+    return generatedItems;
   }
 
   @override
   void initState() {
     super.initState();
+    
+    // Initialize services
+    _cartService = CartService();
+    _orderService = OrderService();
+    _favoritesService = FavoritesService();
+    
+    // Initialize notification service
+    _notificationService.initialize();
+    
+    // Check subscription status first
+    _checkSubscriptionStatus();
+    
+    // Load restaurants from Firestore
+    _loadRestaurantsFromFirestore();
+    
     // Initialize voice service
     _voiceService = VoiceService();
     _voiceService.initialize().then((initialized) {
@@ -583,6 +683,12 @@ class _HomeScreenState extends State<HomeScreen>
       }
     });
     
+    // Listen to cart changes
+    _cartService.addListener(_onCartChanged);
+    
+    // Listen to order changes
+    _orderService.addListener(_onOrderChanged);
+    
     // Add initial AI greeting with action buttons
     _messages.add(Message(
       text: "",
@@ -598,19 +704,105 @@ class _HomeScreenState extends State<HomeScreen>
     // Give initial voice greeting
     Future.delayed(const Duration(milliseconds: 500), () {
       if (mounted) {
-        _voiceService.speak("Welcome to ChatMeal! What would you like to do today?");
+        _voiceService.speak("Welcome to ChatMeal! I'm your AI food ordering assistant. Just tell me what you'd like to eat, and I'll help you find restaurants, browse menus, and place your order. For example, say 'I want pizza' or 'Show me Italian restaurants'. Everything is voice-controlled - just speak naturally!");
       }
     });
+  }
+  
+  /// Check subscription status
+  Future<void> _checkSubscriptionStatus() async {
+    try {
+      final status = await _subscriptionService.checkSubscriptionStatus();
+      if (mounted) {
+        setState(() {
+          _hasActiveSubscription = status.hasSubscription;
+        });
+        
+        if (!status.hasSubscription) {
+          // Show subscription required dialog
+          _showSubscriptionRequiredDialog(status.message);
+        }
+      }
+    } catch (e) {
+      debugPrint('Error checking subscription: $e');
+    }
+  }
+  
+  /// Load restaurants from Firestore
+  void _loadRestaurantsFromFirestore() {
+    setState(() {
+      _isLoadingRestaurants = true;
+    });
     
-    // Example: Set an active order (comment out to hide the banner)
-    // TODO: Later we will work on order functionality
-    // _activeOrder = ActiveOrder(
-    //   id: 'ORD-12345',
-    //   restaurantName: 'Shawarma King',
-    //   status: OrderStatus.onTheWay,
-    //   estimatedTime: '15 min',
-    //   total: 24.99,
-    // );
+    _firebaseService.getActiveRestaurants().listen((restaurants) {
+      if (mounted) {
+        setState(() {
+          _firestoreRestaurants = restaurants;
+          _isLoadingRestaurants = false;
+          
+          // Group restaurants by category
+          _restaurantsByCategory = {};
+          for (var restaurant in restaurants) {
+            final category = restaurant['category'] as String? ?? 
+                            restaurant['cuisine'] as String? ?? 
+                            'Other';
+            if (!_restaurantsByCategory.containsKey(category)) {
+              _restaurantsByCategory[category] = [];
+            }
+            _restaurantsByCategory[category]!.add(restaurant);
+          }
+        });
+      }
+    }, onError: (error) {
+      debugPrint('Error loading restaurants: $error');
+      if (mounted) {
+        setState(() {
+          _isLoadingRestaurants = false;
+          // Use fallback restaurants if Firestore fails
+          _restaurantsByCategory = _fallbackRestaurants;
+        });
+      }
+    });
+  }
+  
+  /// Show subscription required dialog
+  void _showSubscriptionRequiredDialog(String message) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text(
+          'Subscription Required',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: Text(
+          message,
+          style: const TextStyle(color: Colors.grey),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              // TODO: Navigate to subscription screen
+            },
+            child: const Text(
+              'Subscribe',
+              style: TextStyle(color: AppTheme.goldenYellow),
+            ),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+            },
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: Colors.grey),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _startPromotionRotation() {
@@ -685,6 +877,14 @@ class _HomeScreenState extends State<HomeScreen>
       }
     };
     
+    _voiceService.onSpeakingStarted = () {
+      if (mounted) {
+        setState(() {
+          // UI will update based on _voiceService.isSpeaking
+        });
+      }
+    };
+    
     _voiceService.onSpeakingCompleted = () {
       // After AI finishes speaking, automatically start listening if enabled
       if (_autoListenAfterSpeaking && mounted && !_voiceService.isListening) {
@@ -695,6 +895,11 @@ class _HomeScreenState extends State<HomeScreen>
         });
       }
       _autoListenAfterSpeaking = false; // Reset after use
+      if (mounted) {
+        setState(() {
+          // UI will update based on _voiceService.isSpeaking
+        });
+      }
     };
   }
   
@@ -734,7 +939,7 @@ class _HomeScreenState extends State<HomeScreen>
     });
     
     // Build comprehensive context with full restaurant data for AI
-    String context = _buildFullContext();
+    final context = await _buildFullContext();
     
     // Get AI response
     final aiResponse = await _openAIService.getChatResponse(
@@ -767,6 +972,9 @@ class _HomeScreenState extends State<HomeScreen>
       // Try to extract actions from response
       _processAIResponse(aiResponse, text);
       
+      // Enable auto-listening after AI speaks for continuous conversation
+      _autoListenAfterSpeaking = true;
+      
       // Speak the response (always speak, even if it's an error message)
       _voiceService.speak(aiResponse);
       _scrollToBottom();
@@ -777,38 +985,95 @@ class _HomeScreenState extends State<HomeScreen>
   }
   
   /// Build comprehensive context with full restaurant data for AI
-  String _buildFullContext() {
-    final allRestaurants = _restaurantsByCategory.values.expand((list) => list).toList();
+  Future<String> _buildFullContext() async {
+    final restaurants = _restaurantsByCategory.isEmpty
+        ? _fallbackRestaurants.values.expand((list) => list).toList()
+        : _restaurantsByCategory.values.expand((list) => list).toList();
     
-    // Build detailed restaurant data in JSON-like format for AI
-    final restaurantsData = allRestaurants.map((r) {
-      final menuItems = _getMenuItems(r['name'] as String, r['items'] as List<String>);
-      return {
-        'name': r['name'],
-        'cuisine': r['cuisine'],
-        'rating': r['rating'],
-        'deliveryTime': r['deliveryTime'],
-        'category': _getRestaurantCategory(r['name'] as String),
-        'menuItems': menuItems.map((item) => {
-          'name': item['name'],
-          'description': item['description'],
-          'price': item['price'],
-          'category': item['category'],
-        }).toList(),
-      };
-    }).toList();
+    String context = 'IMPORTANT: This is a VOICE-ONLY food ordering app. Users interact entirely through voice conversation with you (ChatGPT). There are NO manual tap interactions - you control everything through voice commands. When users want to browse restaurants, select items, or place orders, they speak to you and you handle it.\n\n';
     
-    String context = 'FULL RESTAURANT DATABASE:\n';
-    context += 'Total restaurants: ${allRestaurants.length}\n\n';
+    // Add cart context
+    if (_cartService.isNotEmpty) {
+      context += 'SHOPPING CART:\n';
+      context += 'Items in cart: ${_cartService.itemCount}\n';
+      context += 'Total: \$${_cartService.total.toStringAsFixed(2)}\n';
+      for (var item in _cartService.items) {
+        context += '- ${item.itemName} x${item.quantity} - \$${item.total.toStringAsFixed(2)}\n';
+      }
+      context += '\n';
+    } else {
+      context += 'SHOPPING CART: Empty\n\n';
+    }
+    
+    // Add order context
+    if (_orderService.activeOrder != null) {
+      final order = _orderService.activeOrder!;
+      context += 'ACTIVE ORDER:\n';
+      context += 'Order ID: ${order.id}\n';
+      context += 'Restaurant: ${order.restaurantName}\n';
+      context += 'Status: ${order.statusDisplay}\n';
+      context += 'Total: \$${order.total.toStringAsFixed(2)}\n\n';
+    }
+    
+    context += 'FULL RESTAURANT DATABASE:\n';
+    context += 'Total restaurants: ${restaurants.length}\n\n';
+    
+    // Add top-rated restaurants summary for quick recommendations
+    if (restaurants.isNotEmpty) {
+      final sortedByRating = List<Map<String, dynamic>>.from(restaurants);
+      sortedByRating.sort((a, b) {
+        final ratingA = (a['rating'] as num?)?.toDouble() ?? 0.0;
+        final ratingB = (b['rating'] as num?)?.toDouble() ?? 0.0;
+        return ratingB.compareTo(ratingA);
+      });
+      
+      context += 'TOP-RATED RESTAURANTS (for recommendations):\n';
+      for (var i = 0; i < (sortedByRating.length > 5 ? 5 : sortedByRating.length); i++) {
+        final r = sortedByRating[i];
+        final name = r['name'] as String? ?? 'Unknown';
+        final rating = r['rating'] ?? 0.0;
+        final cuisine = r['cuisine'] as String? ?? r['category'] as String? ?? 'Unknown';
+        final deliveryTime = r['deliveryTime'] as String? ?? 'N/A';
+        context += '${i + 1}. $name - $cuisine (Rating: $rating, Delivery: $deliveryTime)\n';
+      }
+      context += '\n';
+    }
     
     // Group by category for better organization
-    for (var category in _restaurantsByCategory.keys) {
-      final restaurants = _restaurantsByCategory[category]!;
-      context += '$category (${restaurants.length} restaurants):\n';
-      for (var r in restaurants) {
-        final menuItems = _getMenuItems(r['name'] as String, r['items'] as List<String>);
-        context += '- ${r['name']} (${r['cuisine']}, Rating: ${r['rating']}, Delivery: ${r['deliveryTime']})\n';
-        context += '  Menu: ${menuItems.map((item) => '${item['name']} (\$${item['price']})').join(', ')}\n';
+    final categories = _restaurantsByCategory.isEmpty 
+        ? _fallbackRestaurants.keys 
+        : _restaurantsByCategory.keys;
+    
+    for (var category in categories) {
+      final categoryRestaurants = _restaurantsByCategory.isEmpty
+          ? _fallbackRestaurants[category]!
+          : _restaurantsByCategory[category]!;
+      
+      context += '$category (${categoryRestaurants.length} restaurants):\n';
+      for (var r in categoryRestaurants) {
+        final restaurantId = r['id'] as String? ?? '';
+        final restaurantName = r['name'] as String? ?? 'Unknown';
+        final cuisine = r['cuisine'] as String? ?? r['category'] as String? ?? 'Unknown';
+        final rating = r['rating'] ?? 0.0;
+        final deliveryTime = r['deliveryTime'] as String? ?? 'N/A';
+        
+        // Get menu items (async, but we'll use a simplified version for context)
+        final menuItems = r['menuItems'] as List<dynamic>?;
+        String menuText = 'Menu items available';
+        if (menuItems != null && menuItems.isNotEmpty) {
+          menuText = menuItems.take(5).map((item) {
+            final itemMap = item as Map<String, dynamic>;
+            final name = itemMap['name'] as String? ?? 'Item';
+            final price = itemMap['price'] ?? 0.0;
+            return '$name (\$${price.toStringAsFixed(2)})';
+          }).join(', ');
+          if (menuItems.length > 5) {
+            menuText += ' and ${menuItems.length - 5} more';
+          }
+        }
+        
+        context += '- $restaurantName ($cuisine, Rating: $rating, Delivery: $deliveryTime)\n';
+        context += '  Menu: $menuText\n';
       }
       context += '\n';
     }
@@ -817,9 +1082,12 @@ class _HomeScreenState extends State<HomeScreen>
     if (_selectedRestaurant != null) {
       final restaurant = _getRestaurantByName(_selectedRestaurant!);
       if (restaurant != null) {
-        final menuItems = _getMenuItems(_selectedRestaurant!, restaurant['items'] as List<String>);
+        final restaurantId = restaurant['id'] as String? ?? '';
+        final menuItems = await _getMenuItems(restaurantId, _selectedRestaurant!);
         context += '\nCURRENT STATE: User is viewing menu for $_selectedRestaurant.\n';
-        context += 'Menu items: ${menuItems.map((item) => '${item['name']} - \$${item['price']}').join(', ')}\n';
+        if (menuItems.isNotEmpty) {
+          context += 'Menu items: ${menuItems.take(10).map((item) => '${item['name']} - \$${item['price']}').join(', ')}\n';
+        }
       }
     } else if (_showRestaurants) {
       context += '\nCURRENT STATE: User is browsing restaurants list.\n';
@@ -832,8 +1100,12 @@ class _HomeScreenState extends State<HomeScreen>
   
   /// Get category for a restaurant
   String _getRestaurantCategory(String restaurantName) {
-    for (var entry in _restaurantsByCategory.entries) {
-      if (entry.value.any((r) => r['name'] == restaurantName)) {
+    final restaurants = _restaurantsByCategory.isEmpty 
+        ? _fallbackRestaurants 
+        : _restaurantsByCategory;
+    
+    for (var entry in restaurants.entries) {
+      if (entry.value.any((r) => (r['name'] as String?)?.toLowerCase() == restaurantName.toLowerCase())) {
         return entry.key;
       }
     }
@@ -844,6 +1116,15 @@ class _HomeScreenState extends State<HomeScreen>
   void _processAIResponse(String aiResponse, String userInput) {
     final lowerResponse = aiResponse.toLowerCase();
     final lowerInput = userInput.toLowerCase();
+    
+    // Handle cart commands
+    _processCartCommands(lowerInput, lowerResponse);
+    
+    // Handle order commands
+    _processOrderCommands(lowerInput, lowerResponse);
+    
+    // Handle favorites commands
+    _processFavoritesCommands(lowerInput, lowerResponse);
     
     // Action 1: Show restaurants
     if (_shouldShowRestaurants(lowerInput, lowerResponse)) {
@@ -888,6 +1169,58 @@ class _HomeScreenState extends State<HomeScreen>
     if (menuItemSearch != null) {
       _searchByMenuItem(menuItemSearch);
       return;
+    }
+  }
+  
+  /// Process cart-related voice commands
+  void _processCartCommands(String lowerInput, String lowerResponse) {
+    // Add to cart
+    if (lowerInput.contains('add') && (lowerInput.contains('cart') || lowerInput.contains('order'))) {
+      _handleAddToCart(lowerInput);
+    }
+    // View cart
+    else if (lowerInput.contains('cart') || lowerInput.contains('what\'s in my') || lowerInput.contains('show my')) {
+      _handleShowCart();
+    }
+    // Remove from cart
+    else if (lowerInput.contains('remove') || lowerInput.contains('delete')) {
+      _handleRemoveFromCart(lowerInput);
+    }
+    // Update quantity
+    else if (lowerInput.contains('change') || lowerInput.contains('update') || lowerInput.contains('quantity')) {
+      _handleUpdateQuantity(lowerInput);
+    }
+  }
+  
+  /// Process order-related voice commands
+  void _processOrderCommands(String lowerInput, String lowerResponse) {
+    // Place order
+    if (lowerInput.contains('place') || lowerInput.contains('checkout') || lowerInput.contains('ready to order')) {
+      _handlePlaceOrder();
+    }
+    // Order history
+    else if (lowerInput.contains('order history') || lowerInput.contains('my orders') || lowerInput.contains('past orders')) {
+      _handleShowOrderHistory();
+    }
+    // Track order
+    else if (lowerInput.contains('where') || lowerInput.contains('track') || lowerInput.contains('status')) {
+      _handleTrackOrder();
+    }
+    // Reorder
+    else if (lowerInput.contains('reorder') || lowerInput.contains('same as last')) {
+      _handleReorder();
+    }
+  }
+  
+  /// Process favorites-related voice commands
+  void _processFavoritesCommands(String lowerInput, String lowerResponse) {
+    // Save favorite
+    if (lowerInput.contains('save') || lowerInput.contains('favorite') || lowerInput.contains('like this')) {
+      _handleSaveFavorite();
+    }
+    // View favorites
+    else if (lowerInput.contains('my favorites') || lowerInput.contains('favorite restaurants')) {
+      _handleShowFavorites();
     }
   }
   
@@ -1065,6 +1398,268 @@ class _HomeScreenState extends State<HomeScreen>
     // TODO: Process the actual order details
   }
   
+  // ==================== CART HANDLERS ====================
+  
+  Future<void> _handleAddToCart(String userInput) async {
+    if (_selectedRestaurantData == null) {
+      _voiceService.speak("Please select a restaurant first before adding items to cart.");
+      return;
+    }
+    
+    // Extract item name and quantity from user input
+    // This is simplified - in production, use NLP to extract better
+    final words = userInput.split(' ');
+    int quantity = 1;
+    String? itemName;
+    
+    // Try to extract quantity
+    for (var i = 0; i < words.length; i++) {
+      final num = int.tryParse(words[i]);
+      if (num != null && num > 0) {
+        quantity = num;
+      }
+      if (words[i] == 'pizza' || words[i] == 'burger' || words[i] == 'shawarma' || words[i].contains('item')) {
+        itemName = words.sublist(i).join(' ');
+        break;
+      }
+    }
+    
+    if (itemName == null) {
+      _voiceService.speak("I couldn't identify the item you want to add. Please try again, for example: 'add pizza to cart' or 'I want 2 burgers'.");
+      return;
+    }
+    
+    // Get menu items and find matching item
+    final menuItems = await _getMenuItems(
+      _selectedRestaurantData!['id'] as String? ?? '',
+      _selectedRestaurantData!['name'] as String? ?? '',
+    );
+    
+    final matchedItem = menuItems.firstWhere(
+      (item) => (item['name'] as String?)?.toLowerCase().contains(itemName!.toLowerCase()) ?? false,
+      orElse: () => <String, dynamic>{},
+    );
+    
+    if (matchedItem.isEmpty) {
+      _voiceService.speak("I couldn't find that item on the menu. Please try a different item name.");
+      return;
+    }
+    
+    // Add to cart
+    final cartItem = CartItem(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      restaurantId: _selectedRestaurantData!['id'] as String? ?? '',
+      restaurantName: _selectedRestaurantData!['name'] as String? ?? '',
+      itemName: matchedItem['name'] as String,
+      itemDescription: matchedItem['description'] as String? ?? '',
+      price: (matchedItem['price'] as num).toDouble(),
+      quantity: quantity,
+    );
+    
+    await _cartService.addItem(cartItem);
+    _voiceService.speak("Added $quantity ${matchedItem['name']} to your cart. Your cart total is now \$${_cartService.total.toStringAsFixed(2)}.");
+  }
+  
+  void _handleShowCart() {
+    if (_cartService.isEmpty) {
+      _voiceService.speak("Your cart is empty. Add some items to get started!");
+      return;
+    }
+    
+    final cartSummary = StringBuffer("Your cart contains:\n");
+    for (var item in _cartService.items) {
+      cartSummary.writeln("${item.quantity}x ${item.itemName} - \$${item.total.toStringAsFixed(2)}");
+    }
+    cartSummary.writeln("Total: \$${_cartService.total.toStringAsFixed(2)}");
+    
+    _voiceService.speak(cartSummary.toString());
+  }
+  
+  Future<void> _handleRemoveFromCart(String userInput) async {
+    // Extract item name from input
+    final words = userInput.split(' ');
+    String? itemName;
+    
+    for (var i = 0; i < words.length; i++) {
+      if (words[i] == 'remove' || words[i] == 'delete') {
+        itemName = words.sublist(i + 1).join(' ');
+        break;
+      }
+    }
+    
+    if (itemName == null) return;
+    
+    final itemToRemove = _cartService.items.firstWhere(
+      (item) => item.itemName.toLowerCase().contains(itemName!.toLowerCase()),
+      orElse: () => _cartService.items.first,
+    );
+    
+    await _cartService.removeItem(itemToRemove.id);
+    _voiceService.speak("Removed ${itemToRemove.itemName} from your cart.");
+  }
+  
+  Future<void> _handleUpdateQuantity(String userInput) async {
+    // Extract item name and new quantity
+    // Simplified - in production use better NLP
+    final words = userInput.split(' ');
+    int? newQuantity;
+    String? itemName;
+    
+    for (var i = 0; i < words.length; i++) {
+      final num = int.tryParse(words[i]);
+      if (num != null && num > 0) {
+        newQuantity = num;
+      }
+      if (words[i] == 'to' && i < words.length - 1) {
+        newQuantity = int.tryParse(words[i + 1]);
+      }
+      if (words.contains('pizza') || words.contains('burger')) {
+        itemName = words.firstWhere((w) => w == 'pizza' || w == 'burger');
+      }
+    }
+    
+    if (itemName == null || newQuantity == null) return;
+    
+    final item = _cartService.items.firstWhere(
+      (item) => item.itemName.toLowerCase().contains(itemName!),
+    );
+    
+    await _cartService.updateQuantity(item.id, newQuantity);
+    _voiceService.speak("Updated ${item.itemName} quantity to $newQuantity.");
+  }
+  
+  // ==================== ORDER HANDLERS ====================
+  
+  Future<void> _handlePlaceOrder() async {
+    if (_cartService.isEmpty) {
+      _voiceService.speak("Your cart is empty. Add some items before placing an order.");
+      return;
+    }
+    
+    final userId = _firebaseService.currentUserId;
+    if (userId == null) {
+      _voiceService.speak("Please log in to place an order.");
+      return;
+    }
+    
+    // For now, use a default address - in production, ask user via voice
+    final deliveryAddress = "123 Main St, City, State"; // TODO: Get from user profile
+    
+    final orderId = await _orderService.createOrder(
+      userId: userId,
+      cartItems: _cartService.items,
+      deliveryAddress: deliveryAddress,
+      paymentMethod: 'cash_on_delivery',
+    );
+    
+    if (orderId != null) {
+      await _cartService.clear();
+      _voiceService.speak("Order placed successfully! Your order ID is $orderId. Payment will be cash on delivery. Estimated delivery time is 30 minutes.");
+      
+      // Subscribe to order notifications
+      await _notificationService.subscribeToOrderNotifications(orderId);
+      
+      // Add confirmation message to chat
+      setState(() {
+        _messages.add(Message(
+          text: "✓ Order placed successfully! Order ID: $orderId. Payment: Cash on Delivery. Estimated delivery: 30 minutes.",
+          isAI: true,
+          timestamp: DateTime.now(),
+        ));
+      });
+    } else {
+      _voiceService.speak("Sorry, there was an error placing your order. Please try again.");
+    }
+  }
+  
+  Future<void> _handleShowOrderHistory() async {
+    final userId = _firebaseService.currentUserId;
+    if (userId == null) return;
+    
+    final ordersStream = _orderService.getUserOrdersStream(userId);
+    ordersStream.first.then((orders) {
+      if (orders.isEmpty) {
+        _voiceService.speak("You haven't placed any orders yet.");
+        return;
+      }
+      
+      final summary = StringBuffer("Your recent orders:\n");
+      for (var i = 0; i < (orders.length > 5 ? 5 : orders.length); i++) {
+        final order = orders[i];
+        summary.writeln("Order ${order.id.substring(0, 8)} - ${order.restaurantName} - \$${order.total.toStringAsFixed(2)} - ${order.statusDisplay}");
+      }
+      
+      _voiceService.speak(summary.toString());
+    });
+  }
+  
+  void _handleTrackOrder() {
+    if (_orderService.activeOrder == null) {
+      _voiceService.speak("You don't have an active order to track.");
+      return;
+    }
+    
+    final order = _orderService.activeOrder!;
+    _voiceService.speak("Your order from ${order.restaurantName} is currently ${order.statusDisplay}. Total: \$${order.total.toStringAsFixed(2)}.");
+  }
+  
+  Future<void> _handleReorder() async {
+    final userId = _firebaseService.currentUserId;
+    if (userId == null) return;
+    
+    final ordersStream = _orderService.getUserOrdersStream(userId);
+    ordersStream.first.then((orders) {
+      if (orders.isEmpty) {
+        _voiceService.speak("You don't have any previous orders to reorder.");
+        return;
+      }
+      
+      final lastOrder = orders.first;
+      // For now, just add items back to cart
+      // In production, implement full reorder with address confirmation
+      _voiceService.speak("I'll help you reorder from ${lastOrder.restaurantName}. Add items to your cart and place the order when ready.");
+    });
+  }
+  
+  // ==================== FAVORITES HANDLERS ====================
+  
+  Future<void> _handleSaveFavorite() async {
+    if (_selectedRestaurantData == null) {
+      _voiceService.speak("Please select a restaurant first to save it as favorite.");
+      return;
+    }
+    
+    final restaurantId = _selectedRestaurantData!['id'] as String? ?? '';
+    final restaurantName = _selectedRestaurantData!['name'] as String? ?? '';
+    
+    if (restaurantId.isEmpty) {
+      _voiceService.speak("Unable to save favorite. Restaurant ID is missing.");
+      return;
+    }
+    
+    final success = await _favoritesService.addFavorite(restaurantId, restaurantName);
+    if (success) {
+      _voiceService.speak("Saved $restaurantName to your favorites!");
+    } else {
+      _voiceService.speak("Sorry, there was an error saving the favorite.");
+    }
+  }
+  
+  Future<void> _handleShowFavorites() async {
+    final favorites = await _favoritesService.getFavoriteRestaurants();
+    if (favorites.isEmpty) {
+      _voiceService.speak("You don't have any favorite restaurants yet. Save restaurants you like to access them quickly.");
+      return;
+    }
+    
+    final summary = StringBuffer("Your favorite restaurants:\n");
+    for (var restaurant in favorites) {
+      summary.writeln("${restaurant['name']} - ${restaurant['cuisine'] ?? ''}");
+    }
+    
+    _voiceService.speak(summary.toString());
+  }
+  
   void _showApiKeyDialog() {
     final apiKeyController = TextEditingController();
     
@@ -1152,10 +1747,55 @@ class _HomeScreenState extends State<HomeScreen>
 
   @override
   void dispose() {
+    _cartService.removeListener(_onCartChanged);
+    _orderService.removeListener(_onOrderChanged);
     _voiceService.dispose();
     _scrollController.dispose();
     _cardAnimationController.dispose();
     super.dispose();
+  }
+  
+  void _onCartChanged() {
+    if (mounted) {
+      setState(() {
+        // Cart changed, update UI if needed
+      });
+    }
+  }
+  
+  void _onOrderChanged() {
+    if (mounted) {
+      setState(() {
+        // Order changed, update UI if needed
+        if (_orderService.activeOrder != null) {
+          final order = _orderService.activeOrder!;
+          _activeOrder = ActiveOrder(
+            id: order.id,
+            restaurantName: order.restaurantName,
+            status: _mapOrderStatus(order.status),
+            estimatedTime: order.estimatedDeliveryTime != null
+                ? '${DateTime.now().difference(order.estimatedDeliveryTime!).inMinutes.abs()} min'
+                : '30 min',
+            total: order.total,
+          );
+        } else {
+          _activeOrder = null;
+        }
+      });
+    }
+  }
+  
+  OrderStatus _mapOrderStatus(String status) {
+    switch (status) {
+      case 'preparing':
+        return OrderStatus.preparing;
+      case 'onTheWay':
+        return OrderStatus.onTheWay;
+      case 'delivered':
+        return OrderStatus.delivered;
+      default:
+        return OrderStatus.preparing;
+    }
   }
 
   Future<void> _handleLogout(BuildContext context) async {
@@ -1164,6 +1804,11 @@ class _HomeScreenState extends State<HomeScreen>
     if (context.mounted) {
       context.go('/auth');
     }
+  }
+
+  void _toggleThemeMode() {
+    final themeService = Provider.of<ThemeService>(context, listen: false);
+    themeService.toggleTheme();
   }
 
   void _toggleListening() async {
@@ -1180,7 +1825,10 @@ class _HomeScreenState extends State<HomeScreen>
   void _selectRestaurant(String restaurantName) {
     // User selected a restaurant - show menu
     final restaurantData = _getRestaurantByName(restaurantName);
-    if (restaurantData == null) return;
+    if (restaurantData == null) {
+      _voiceService.speak("Sorry, I couldn't find that restaurant. Please try again.");
+      return;
+    }
     
     setState(() {
       _showRestaurants = false;
@@ -1337,70 +1985,102 @@ class _HomeScreenState extends State<HomeScreen>
                 _showApiKeyDialog();
               } else if (value == 'api_key') {
                 _showApiKeyDialog();
+              } else if (value == 'theme') {
+                _toggleThemeMode();
               } else if (value == 'logout') {
                 _handleLogout(context);
               }
             },
-            itemBuilder: (BuildContext context) => [
-              const PopupMenuItem<String>(
-                value: 'profile',
-                child: Row(
-                  children: [
-                    Icon(Icons.person, color: Colors.white70, size: 20),
-                    SizedBox(width: 12),
-                    Text('Profile', style: TextStyle(color: Colors.white)),
-                  ],
+            itemBuilder: (BuildContext context) {
+              final themeService = Provider.of<ThemeService>(context, listen: true);
+              return [
+                const PopupMenuItem<String>(
+                  value: 'profile',
+                  child: Row(
+                    children: [
+                      Icon(Icons.person, color: Colors.white70, size: 20),
+                      SizedBox(width: 12),
+                      Text('Profile', style: TextStyle(color: Colors.white)),
+                    ],
+                  ),
                 ),
-              ),
-              const PopupMenuItem<String>(
-                value: 'settings',
-                child: Row(
-                  children: [
-                    Icon(Icons.settings, color: Colors.white70, size: 20),
-                    SizedBox(width: 12),
-                    Text('Settings', style: TextStyle(color: Colors.white)),
-                  ],
+                const PopupMenuItem<String>(
+                  value: 'settings',
+                  child: Row(
+                    children: [
+                      Icon(Icons.settings, color: Colors.white70, size: 20),
+                      SizedBox(width: 12),
+                      Text('Settings', style: TextStyle(color: Colors.white)),
+                    ],
+                  ),
                 ),
-              ),
-              const PopupMenuItem<String>(
-                value: 'api_key',
-                child: Row(
-                  children: [
-                    Icon(Icons.key, color: AppTheme.goldenYellow, size: 20),
-                    SizedBox(width: 12),
-                    Text('OpenAI API Key', style: TextStyle(color: Colors.white)),
-                  ],
+                const PopupMenuItem<String>(
+                  value: 'api_key',
+                  child: Row(
+                    children: [
+                      Icon(Icons.key, color: AppTheme.goldenYellow, size: 20),
+                      SizedBox(width: 12),
+                      Text('OpenAI API Key', style: TextStyle(color: Colors.white)),
+                    ],
+                  ),
                 ),
-              ),
-              const PopupMenuDivider(),
-              const PopupMenuItem<String>(
-                value: 'logout',
-                child: Row(
-                  children: [
-                    Icon(Icons.logout, color: Colors.red, size: 20),
-                    SizedBox(width: 12),
-                    Text('Logout', style: TextStyle(color: Colors.red)),
-                  ],
+                PopupMenuItem<String>(
+                  value: 'theme',
+                  child: Row(
+                    children: [
+                      Icon(
+                        themeService.themeMode == ThemeMode.dark ? Icons.light_mode : Icons.dark_mode,
+                        color: AppTheme.goldenYellow,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 12),
+                      Text(
+                        themeService.themeMode == ThemeMode.dark ? 'Light Mode' : 'Dark Mode',
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+                const PopupMenuDivider(),
+                const PopupMenuItem<String>(
+                  value: 'logout',
+                  child: Row(
+                    children: [
+                      Icon(Icons.logout, color: Colors.red, size: 20),
+                      SizedBox(width: 12),
+                      Text('Logout', style: TextStyle(color: Colors.red)),
+                    ],
+                  ),
+                ),
+              ];
+            },
           ),
           const SizedBox(width: 8),
         ],
       ),
-      body: Column(
+      body: Stack(
         children: [
-          // Active Order Status Banner
-          if (_activeOrder != null) _buildActiveOrderBanner(),
-          
-          // Content Area - Restaurants, Menu, or Chat
-          Expanded(
-            child: _showMenu
-                ? _buildMenuView()
-                : (_showRestaurants
-                    ? _buildRestaurantsList()
-                    : _buildChatView()),
+          Column(
+            children: [
+              // Active Order Status Banner (Enhanced with Timeline)
+              if (_activeOrder != null) _buildActiveOrderBanner(),
+              
+              // Shopping Cart Summary
+              _buildShoppingCartSummary(),
+              
+              // Content Area - Restaurants, Menu, or Chat
+              Expanded(
+                child: _showMenu
+                    ? _buildMenuView()
+                    : (_showRestaurants
+                        ? _buildRestaurantsList()
+                        : _buildChatView()),
+              ),
+            ],
           ),
+          
+          // Floating Action Button (FAB) for Voice Input
+          _buildVoiceFAB(),
         ],
       ),
     );
@@ -1419,9 +2099,7 @@ class _HomeScreenState extends State<HomeScreen>
             itemBuilder: (context, index) {
               final category = _categories[index];
               final isSelected = _selectedCategory == category;
-              return GestureDetector(
-                onTap: () => setState(() => _selectedCategory = category),
-                child: Container(
+              return Container(
                   margin: const EdgeInsets.only(right: 12),
                   padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
                   decoration: BoxDecoration(
@@ -1450,7 +2128,6 @@ class _HomeScreenState extends State<HomeScreen>
                       ),
                     ),
                   ),
-                ),
               );
             },
           ),
@@ -1544,9 +2221,22 @@ class _HomeScreenState extends State<HomeScreen>
     }
     
     final restaurant = _selectedRestaurantData!;
-    final menuItems = _getMenuItems(_selectedRestaurant!, restaurant['items'] as List<String>);
+    final restaurantId = restaurant['id'] as String? ?? '';
     
-    return Column(
+    return FutureBuilder<List<Map<String, dynamic>>>(
+      future: _getMenuItems(restaurantId, _selectedRestaurant!),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        
+        if (snapshot.hasError) {
+          return Center(child: Text('Error loading menu: ${snapshot.error}'));
+        }
+        
+        final menuItems = snapshot.data ?? [];
+        
+        return Column(
       children: [
         // Restaurant Header
         Container(
@@ -1752,6 +2442,8 @@ class _HomeScreenState extends State<HomeScreen>
         ),
       ],
     );
+      },
+    );
   }
 
   Widget _buildRestaurantCard(Map<String, dynamic> restaurant) {
@@ -1767,10 +2459,7 @@ class _HomeScreenState extends State<HomeScreen>
       ),
       child: Material(
         color: Colors.transparent,
-        child: InkWell(
-          onTap: () => _selectRestaurant(restaurant['name'] as String),
-          borderRadius: BorderRadius.circular(16),
-          child: Padding(
+        child: Padding(
             padding: const EdgeInsets.all(16),
             child: Row(
               children: [
@@ -1857,7 +2546,6 @@ class _HomeScreenState extends State<HomeScreen>
             ),
           ),
         ),
-      ),
     );
   }
 
@@ -1888,7 +2576,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     return Container(
-      margin: const EdgeInsets.all(16),
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         gradient: LinearGradient(
@@ -1913,201 +2601,476 @@ class _HomeScreenState extends State<HomeScreen>
           ),
         ],
       ),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: () {
-            // TODO: Navigate to order tracking screen
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Tracking order ${order.id}'),
-                backgroundColor: AppTheme.darkTealGreen,
-              ),
-            );
-          },
-          borderRadius: BorderRadius.circular(16),
-          child: Row(
-            children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: statusColor.withValues(alpha: 0.3),
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: statusColor,
-                    width: 2,
-                  ),
-                ),
-                child: Icon(
-                  statusIcon,
-                  color: statusColor,
-                  size: 24,
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      statusText,
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: statusColor,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '${order.restaurantName} • ETA: ${order.estimatedTime}',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: Colors.grey[300],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    '\$${order.total.toStringAsFixed(2)}',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Icon(
-                    Icons.arrow_forward_ios,
-                    color: statusColor,
-                    size: 16,
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildPromotionsBanner() {
-    if (_promotions.isEmpty) return const SizedBox.shrink();
-
-    final promotion = _promotions[_currentPromotionIndex];
-
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: () {
-            HapticFeedback.lightImpact();
-            // TODO: Navigate to promotions screen or apply code
-            if (promotion.code != null) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('Promo code ${promotion.code} copied!'),
-                  backgroundColor: AppTheme.darkTealGreen,
-                  action: SnackBarAction(
-                    label: 'Apply',
-                    textColor: AppTheme.goldenYellow,
-                    onPressed: () {},
-                  ),
-                ),
-              );
-            }
-          },
-          borderRadius: BorderRadius.circular(16),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  promotion.color.withValues(alpha: 0.25),
-                  promotion.color.withValues(alpha: 0.15),
-                ],
-              ),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(
-                color: promotion.color.withValues(alpha: 0.4),
-                width: 1.5,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: promotion.color.withValues(alpha: 0.2),
-                  blurRadius: 8,
-                  spreadRadius: 0,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
+      child: Column(
+        children: [
+          Material(
+            color: Colors.transparent,
             child: Row(
               children: [
                 Container(
-                  padding: const EdgeInsets.all(6),
+                  width: 48,
+                  height: 48,
                   decoration: BoxDecoration(
-                    color: promotion.color.withValues(alpha: 0.3),
-                    borderRadius: BorderRadius.circular(8),
+                    color: statusColor.withValues(alpha: 0.3),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: statusColor,
+                      width: 2,
+                    ),
                   ),
                   child: Icon(
-                    Icons.local_offer,
-                    color: promotion.color,
-                    size: 20,
+                    statusIcon,
+                    color: statusColor,
+                    size: 24,
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 16),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        promotion.title,
+                        statusText,
                         style: TextStyle(
-                          fontSize: 14,
+                          fontSize: 16,
                           fontWeight: FontWeight.bold,
-                          color: promotion.color,
+                          color: statusColor,
                         ),
                       ),
-                      const SizedBox(height: 2),
+                      const SizedBox(height: 4),
                       Text(
-                        promotion.description,
+                        '${order.restaurantName} • ETA: ${order.estimatedTime}',
                         style: TextStyle(
-                          fontSize: 11,
+                          fontSize: 13,
                           color: Colors.grey[300],
                         ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
                       ),
                     ],
                   ),
                 ),
-                if (_promotions.length > 1)
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: List.generate(
-                      _promotions.length,
-                      (index) => Container(
-                        margin: const EdgeInsets.only(left: 4),
-                        width: 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: index == _currentPromotionIndex
-                              ? promotion.color
-                              : promotion.color.withValues(alpha: 0.3),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      '\$${order.total.toStringAsFixed(2)}',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Icon(
+                      Icons.arrow_forward_ios,
+                      color: statusColor,
+                      size: 16,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          // Order Progress Timeline
+          _buildOrderProgressTimeline(order.status),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOrderProgressTimeline(OrderStatus currentStatus) {
+    final steps = [
+      {'status': OrderStatus.preparing, 'label': 'Ordered', 'icon': Icons.check_circle_outline},
+      {'status': OrderStatus.preparing, 'label': 'Preparing', 'icon': Icons.restaurant_menu},
+      {'status': OrderStatus.onTheWay, 'label': 'On the way', 'icon': Icons.delivery_dining},
+      {'status': OrderStatus.delivered, 'label': 'Delivered', 'icon': Icons.check_circle},
+    ];
+
+    int currentStep = 0;
+    switch (currentStatus) {
+      case OrderStatus.preparing:
+        currentStep = 1;
+        break;
+      case OrderStatus.onTheWay:
+        currentStep = 2;
+        break;
+      case OrderStatus.delivered:
+        currentStep = 3;
+        break;
+    }
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: List.generate(steps.length, (index) {
+        final isCompleted = index <= currentStep;
+        final isCurrent = index == currentStep;
+        final step = steps[index];
+        
+        return Expanded(
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: isCompleted
+                            ? (isCurrent ? AppTheme.goldenYellow : AppTheme.darkTealGreen)
+                            : Colors.grey[800],
+                        border: Border.all(
+                          color: isCompleted
+                              ? (isCurrent ? AppTheme.goldenYellow : AppTheme.darkTealGreen)
+                              : Colors.grey[700]!,
+                          width: 2,
+                        ),
+                      ),
+                      child: Icon(
+                        step['icon'] as IconData,
+                        size: 16,
+                        color: isCompleted ? Colors.white : Colors.grey[500],
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      step['label'] as String,
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: isCompleted ? Colors.white70 : Colors.grey[600],
+                        fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
+              if (index < steps.length - 1)
+                Expanded(
+                  child: Container(
+                    height: 2,
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                      color: index < currentStep
+                          ? AppTheme.darkTealGreen
+                          : Colors.grey[800],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      }),
+    );
+  }
+
+  Widget _buildShoppingCartSummary() {
+    return Consumer<CartService>(
+      builder: (context, cartService, child) {
+        if (cartService.isEmpty) return const SizedBox.shrink();
+
+        return Container(
+          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                AppTheme.goldenYellow.withValues(alpha: 0.2),
+                AppTheme.goldenOrange.withValues(alpha: 0.15),
+              ],
+            ),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: AppTheme.goldenYellow.withValues(alpha: 0.5),
+              width: 1.5,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: AppTheme.goldenYellow.withValues(alpha: 0.2),
+                blurRadius: 12,
+                spreadRadius: 0,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () {
+                // Trigger voice command to show cart
+                _voiceService.speak("Here's your cart. Say 'show my cart' to view details.");
+                _handleVoiceInput("show my cart");
+              },
+              borderRadius: BorderRadius.circular(16),
+              child: Row(
+                children: [
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: AppTheme.goldenYellow.withValues(alpha: 0.3),
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: AppTheme.goldenYellow,
+                        width: 2,
+                      ),
+                    ),
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        const Icon(
+                          Icons.shopping_cart,
+                          color: AppTheme.goldenYellow,
+                          size: 24,
+                        ),
+                        if (cartService.itemCount > 0)
+                          Positioned(
+                            right: 0,
+                            top: 0,
+                            child: Container(
+                              padding: const EdgeInsets.all(4),
+                              decoration: const BoxDecoration(
+                                color: AppTheme.darkTealGreen,
+                                shape: BoxShape.circle,
+                              ),
+                              constraints: const BoxConstraints(
+                                minWidth: 20,
+                                minHeight: 20,
+                              ),
+                              child: Text(
+                                '${cartService.itemCount}',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Shopping Cart',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: AppTheme.goldenYellow,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${cartService.itemCount} ${cartService.itemCount == 1 ? 'item' : 'items'} • \$${cartService.total.toStringAsFixed(2)}',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.grey[300],
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Say "show my cart" or "checkout"',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.grey[500],
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Icon(
+                    Icons.arrow_forward_ios,
+                    color: AppTheme.goldenYellow,
+                    size: 18,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+
+  Widget _buildPromotionsBanner() {
+    if (_promotions.isEmpty) return const SizedBox.shrink();
+
+    final promotion = _promotions[_currentPromotionIndex];
+    
+    // Check if promotion is expired
+    if (promotion.isExpired) {
+      // Skip to next promotion
+      Future.microtask(() {
+        if (mounted && _currentPromotionIndex < _promotions.length - 1) {
+          setState(() {
+            _currentPromotionIndex = (_currentPromotionIndex + 1) % _promotions.length;
+          });
+        }
+      });
+      return const SizedBox.shrink();
+    }
+
+    String timeRemainingText = '';
+    if (promotion.timeRemaining != null) {
+      final duration = promotion.timeRemaining!;
+      if (duration.inDays > 0) {
+        timeRemainingText = '${duration.inDays}d ${duration.inHours % 24}h left';
+      } else if (duration.inHours > 0) {
+        timeRemainingText = '${duration.inHours}h ${duration.inMinutes % 60}m left';
+      } else {
+        timeRemainingText = '${duration.inMinutes}m left';
+      }
+    }
+
+    String usesText = '';
+    if (promotion.maxUses != null && promotion.remainingUses != null) {
+      usesText = '${promotion.remainingUses} uses left';
+    }
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                promotion.color.withValues(alpha: 0.25),
+                promotion.color.withValues(alpha: 0.15),
+              ],
+            ),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: promotion.color.withValues(alpha: 0.4),
+              width: 1.5,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: promotion.color.withValues(alpha: 0.2),
+                blurRadius: 8,
+                spreadRadius: 0,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: promotion.color.withValues(alpha: 0.3),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(
+                      Icons.local_offer,
+                      color: promotion.color,
+                      size: 20,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          promotion.title,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: promotion.color,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          promotion.description,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.grey[300],
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (_promotions.length > 1)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: List.generate(
+                        _promotions.length,
+                        (index) => Container(
+                          margin: const EdgeInsets.only(left: 4),
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: index == _currentPromotionIndex
+                                ? promotion.color
+                                : promotion.color.withValues(alpha: 0.3),
+                          ),
                         ),
                       ),
                     ),
-                  ),
+                ],
+              ),
+              if (timeRemainingText.isNotEmpty || usesText.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    if (timeRemainingText.isNotEmpty) ...[
+                      Icon(
+                        Icons.access_time,
+                        size: 12,
+                        color: promotion.color.withValues(alpha: 0.8),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        timeRemainingText,
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: promotion.color.withValues(alpha: 0.8),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                    if (timeRemainingText.isNotEmpty && usesText.isNotEmpty)
+                      const SizedBox(width: 12),
+                    if (usesText.isNotEmpty) ...[
+                      Icon(
+                        Icons.people_outline,
+                        size: 12,
+                        color: promotion.color.withValues(alpha: 0.8),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        usesText,
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: promotion.color.withValues(alpha: 0.8),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
               ],
-            ),
+            ],
           ),
         ),
       ),
@@ -2164,10 +3127,7 @@ class _HomeScreenState extends State<HomeScreen>
                 margin: const EdgeInsets.only(right: 10),
                 child: Material(
                   color: Colors.transparent,
-                  child: InkWell(
-                    onTap: () => _selectRestaurant(restaurant['name'] as String),
-                    borderRadius: BorderRadius.circular(16),
-                    child: Container(
+                  child: Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: Colors.grey[900],
@@ -2260,7 +3220,6 @@ class _HomeScreenState extends State<HomeScreen>
                       ),
                     ),
                   ),
-                ),
               );
             },
           ),
@@ -2300,7 +3259,7 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                   // Restaurant Recommendations (after action cards)
                   _buildRestaurantRecommendations(),
-                  // Promotions Banner (at the bottom)
+                  // Promotions Banner (Enhanced with countdown and usage)
                   _buildPromotionsBanner(),
                 ],
               ),
@@ -2329,123 +3288,7 @@ class _HomeScreenState extends State<HomeScreen>
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
           child: Column(
-            children: [
-              // Welcome Hero Section
-              Column(
-                children: [
-                  ShaderMask(
-                    shaderCallback: (bounds) => LinearGradient(
-                      colors: [
-                        AppTheme.goldenOrange,
-                        AppTheme.goldenYellow,
-                        AppTheme.lightTeal,
-                        AppTheme.darkTealGreen,
-                      ],
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                    ).createShader(bounds),
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      child: const Text(
-                        'What would you like to do?',
-                        style: TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                          letterSpacing: 0.5,
-                        ),
-                        textAlign: TextAlign.center,
-                        maxLines: 1,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              
-              // Browse Restaurants Card
-              AnimatedBuilder(
-                animation: _cardAnimationController,
-                builder: (context, child) {
-                  return Opacity(
-                    opacity: _card1Animation.value,
-                    child: Transform.translate(
-                      offset: Offset(0, 20 * (1 - _card1Animation.value)),
-                      child: Transform.scale(
-                        scale: 0.95 + (0.05 * _card1Animation.value),
-                        child: _ActionCard(
-                          title: 'Browse Restaurants',
-                          description: 'Explore menus and discover amazing local restaurants',
-                          icon: Icons.restaurant_menu_rounded,
-                          gradient: const LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: [
-                              AppTheme.goldenOrange,
-                              AppTheme.goldenYellow,
-                            ],
-                          ),
-                          shadowColor: AppTheme.goldenYellow,
-                          textColor: AppTheme.darkTealGreen,
-                          iconColor: AppTheme.darkTealGreen,
-                          onTap: () {
-                            HapticFeedback.mediumImpact();
-                            setState(() {
-                              _showRestaurants = true;
-                              _selectedRestaurant = null;
-                            });
-                            _voiceService.speak("Here are the restaurants. Browse through them and tap on one to start ordering.");
-                          },
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-              
-              const SizedBox(height: 12),
-              
-              // Speak with AI Card
-              AnimatedBuilder(
-                animation: _cardAnimationController,
-                builder: (context, child) {
-                  return Opacity(
-                    opacity: _card2Animation.value,
-                    child: Transform.translate(
-                      offset: Offset(0, 20 * (1 - _card2Animation.value)),
-                      child: Transform.scale(
-                        scale: 0.95 + (0.05 * _card2Animation.value),
-                        child: _ActionCard(
-                          title: 'Speak with AI',
-                          description: 'Order naturally using your voice - just tell me what you crave',
-                          icon: Icons.record_voice_over_rounded,
-                          gradient: const LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: [
-                              AppTheme.darkTealGreen,
-                              AppTheme.lightTeal,
-                            ],
-                          ),
-                          shadowColor: AppTheme.darkTealGreen,
-                          textColor: AppTheme.goldenYellow,
-                          iconColor: AppTheme.goldenYellow,
-                          onTap: () {
-                            HapticFeedback.mediumImpact();
-                            setState(() {
-                              _showRestaurants = false;
-                              _selectedRestaurant = null;
-                              _autoListenAfterSpeaking = true;
-                            });
-                            _voiceService.speak("Perfect! Just tell me what you'd like to eat, and I'll help you find the best restaurants and place your order. For example, say 'I want shawarma' or 'I'm craving pizza'.");
-                          },
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ],
+            children: [],
           ),
         ),
       );
@@ -2603,4 +3446,94 @@ class _HomeScreenState extends State<HomeScreen>
       ),
     );
   }
+
+  /// Build Floating Action Button for Voice Input
+  Widget _buildVoiceFAB() {
+    return Positioned(
+      bottom: 30,
+      right: 20,
+      child: GestureDetector(
+        onLongPressStart: (_) {
+          // Start listening on long press
+          if (!_voiceService.isListening && !_voiceService.isSpeaking) {
+            _toggleListening();
+          }
+        },
+        onLongPressEnd: (_) {
+          // Stop listening when released
+          if (_voiceService.isListening) {
+            _voiceService.stopListening();
+          }
+        },
+        child: Container(
+          width: 72,
+          height: 72,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: _isListening
+                  ? [
+                      AppTheme.darkTealGreen,
+                      AppTheme.lightTeal,
+                    ]
+                  : [
+                      AppTheme.goldenYellow,
+                      AppTheme.goldenOrange,
+                    ],
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: (_isListening
+                        ? AppTheme.darkTealGreen
+                        : AppTheme.goldenYellow)
+                    .withValues(alpha: 0.6),
+                blurRadius: 24,
+                spreadRadius: 4,
+                offset: const Offset(0, 8),
+              ),
+              BoxShadow(
+                color: (_isListening
+                        ? AppTheme.lightTeal
+                        : AppTheme.goldenOrange)
+                    .withValues(alpha: 0.4),
+                blurRadius: 16,
+                spreadRadius: 2,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: _isListening
+                  ? () {
+                      _voiceService.stopListening();
+                    }
+                  : () {
+                      if (_voiceService.isSpeaking) {
+                        _voiceService.stopSpeaking();
+                      }
+                      _toggleListening();
+                    },
+              borderRadius: BorderRadius.circular(36),
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  // Microphone icon
+                  Icon(
+                    _isListening ? Icons.mic : Icons.mic_none_rounded,
+                    color: Colors.white,
+                    size: 32,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
 }

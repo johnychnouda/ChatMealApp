@@ -2,6 +2,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'firebase_service.dart';
 
 /// Service to manage authentication and onboarding state
 class AuthService {
@@ -11,6 +13,9 @@ class AuthService {
   static const String _registeredUsersKey = 'registered_users';
   static const String _skipAutoLoginKey = 'skip_auto_login';
   static const String _isGuestModeKey = 'is_guest_mode';
+
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+  final FirebaseService _firebaseService = FirebaseService();
 
   // In-memory fallback storage (used when SharedPreferences fails)
   static final Map<String, dynamic> _memoryStorage = {};
@@ -40,14 +45,19 @@ class AuthService {
     }
   }
 
-  /// Check if user is logged in
+  /// Check if user is logged in (using Firebase Auth)
   Future<bool> isLoggedIn() async {
     try {
+      // Check Firebase Auth first
+      final user = _auth.currentUser;
+      if (user != null) {
+        return true;
+      }
+      // Fallback to SharedPreferences for backward compatibility
       final prefs = await SharedPreferences.getInstance();
       return prefs.getBool(_isLoggedInKey) ?? false;
     } catch (e) {
-      debugPrint('AuthService: SharedPreferences error, using memory fallback: $e');
-      // Fallback to in-memory storage
+      debugPrint('AuthService: Error checking login status: $e');
       return _memoryStorage[_isLoggedInKey] as bool? ?? false;
     }
   }
@@ -72,45 +82,128 @@ class AuthService {
     }
   }
 
-  /// Logout user
-  Future<void> logout() async {
+  /// Sign up with email and password
+  Future<String?> signUpWithEmailPassword(String email, String password) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_isLoggedInKey, false);
-      await prefs.remove(_userIdKey);
-      // Set flag to skip auto-login after manual logout
-      await prefs.setBool(_skipAutoLoginKey, true);
-      _memoryStorage[_isLoggedInKey] = false; // Update memory cache
-      _memoryStorage.remove(_userIdKey);
-      _memoryStorage[_skipAutoLoginKey] = true;
+      final UserCredential userCredential = await _auth.createUserWithEmailAndPassword(
+        email: email.trim(),
+        password: password,
+      );
+      
+      final user = userCredential.user;
+      if (user != null) {
+        // Create user document in Firestore
+        await _firebaseService.createOrUpdateUser(
+          userId: user.uid,
+          email: user.email ?? email,
+          displayName: user.displayName,
+          photoUrl: user.photoURL,
+        );
+        
+        // Also update SharedPreferences for backward compatibility
+        await login(user.uid);
+        await registerUser(email);
+        
+        debugPrint('Email sign-up successful: $email');
+        return user.uid;
+      }
+      
+      return null;
+    } on FirebaseAuthException catch (e) {
+      debugPrint('Firebase Auth error during sign-up: ${e.code} - ${e.message}');
+      rethrow;
     } catch (e) {
-      debugPrint('AuthService: SharedPreferences error, using memory fallback: $e');
-      // Fallback to in-memory storage
-      _memoryStorage[_isLoggedInKey] = false;
-      _memoryStorage.remove(_userIdKey);
-      _memoryStorage[_skipAutoLoginKey] = true;
+      debugPrint('Email sign-up error: $e');
+      rethrow;
     }
   }
 
-  /// Get current user ID
+  /// Sign in with email and password
+  Future<String?> signInWithEmailPassword(String email, String password) async {
+    try {
+      final UserCredential userCredential = await _auth.signInWithEmailAndPassword(
+        email: email.trim(),
+        password: password,
+      );
+      
+      final user = userCredential.user;
+      if (user != null) {
+        // Update user document in Firestore (in case it doesn't exist)
+        await _firebaseService.createOrUpdateUser(
+          userId: user.uid,
+          email: user.email ?? email,
+          displayName: user.displayName,
+          photoUrl: user.photoURL,
+        );
+        
+        // Also update SharedPreferences for backward compatibility
+        await login(user.uid);
+        
+        debugPrint('Email sign-in successful: $email');
+        return user.uid;
+      }
+      
+      return null;
+    } on FirebaseAuthException catch (e) {
+      debugPrint('Firebase Auth error during sign-in: ${e.code} - ${e.message}');
+      rethrow;
+    } catch (e) {
+      debugPrint('Email sign-in error: $e');
+      rethrow;
+    }
+  }
+
+  /// Logout user (using Firebase Auth)
+  Future<void> logout() async {
+    try {
+      // Sign out from Firebase
+      await _auth.signOut();
+      
+      // Also sign out from Google if signed in
+      await signOutGoogle();
+      
+      // Update SharedPreferences for backward compatibility
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_isLoggedInKey, false);
+      await prefs.remove(_userIdKey);
+      await prefs.setBool(_skipAutoLoginKey, true);
+      _memoryStorage[_isLoggedInKey] = false;
+      _memoryStorage.remove(_userIdKey);
+      _memoryStorage[_skipAutoLoginKey] = true;
+      
+      debugPrint('AuthService: User logged out');
+    } catch (e) {
+      debugPrint('AuthService: Error during logout: $e');
+      rethrow;
+    }
+  }
+
+  /// Get current user ID (using Firebase Auth)
   Future<String?> getUserId() async {
     try {
+      // Get from Firebase Auth first
+      final user = _auth.currentUser;
+      if (user != null) {
+        return user.uid;
+      }
+      // Fallback to SharedPreferences for backward compatibility
       final prefs = await SharedPreferences.getInstance();
       return prefs.getString(_userIdKey);
     } catch (e) {
-      debugPrint('AuthService: SharedPreferences error, using memory fallback: $e');
-      // Fallback to in-memory storage
+      debugPrint('AuthService: Error getting user ID: $e');
       return _memoryStorage[_userIdKey] as String?;
     }
   }
 
-  /// Sign in with Google
+  /// Get current Firebase user
+  User? getCurrentUser() {
+    return _auth.currentUser;
+  }
+
+  /// Sign in with Google (using Firebase Auth)
   Future<String?> signInWithGoogle() async {
     try {
-      final GoogleSignIn googleSignIn = GoogleSignIn(
-        scopes: ['email', 'profile'],
-      );
-      
+      final GoogleSignIn googleSignIn = GoogleSignIn();
       final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
       
       if (googleUser == null) {
@@ -118,46 +211,87 @@ class AuthService {
         return null;
       }
 
-      // Get email from Google account
-      final String email = googleUser.email;
+      // Obtain the auth details from the request
+      final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
+
+      // Create a new credential
+      final credential = GoogleAuthProvider.credential(
+        accessToken: googleAuth.accessToken,
+        idToken: googleAuth.idToken,
+      );
+
+      // Sign in to Firebase with the Google credential
+      final UserCredential userCredential = await _auth.signInWithCredential(credential);
+      final user = userCredential.user;
       
-      // Store authentication state
-      await login(email);
+      if (user != null) {
+        // Create or update user document in Firestore
+        await _firebaseService.createOrUpdateUser(
+          userId: user.uid,
+          email: user.email ?? '',
+          displayName: user.displayName,
+          photoUrl: user.photoURL,
+        );
+        
+        // Also update SharedPreferences for backward compatibility
+        await login(user.uid);
+        
+        debugPrint('Google Sign-In successful: ${user.email}');
+        return user.uid;
+      }
       
-      debugPrint('Google Sign-In successful: $email');
-      return email;
+        return null;
+    } on FirebaseAuthException catch (e) {
+      debugPrint('Firebase Auth error during Google Sign-In: ${e.code} - ${e.message}');
+      rethrow;
     } catch (e) {
-      debugPrint('Google Sign-In error: $e');
+      debugPrint('Google Sign-In unexpected error: $e');
       rethrow;
     }
   }
 
-  /// Sign in with Apple
+  /// Sign in with Apple (using Firebase Auth)
   Future<String?> signInWithApple() async {
     try {
-      final credential = await SignInWithApple.getAppleIDCredential(
+      final appleCredential = await SignInWithApple.getAppleIDCredential(
         scopes: [
           AppleIDAuthorizationScopes.email,
           AppleIDAuthorizationScopes.fullName,
         ],
       );
 
-      // Use user identifier or email as user ID
-      final String? userId = credential.userIdentifier;
-      final String? email = credential.email;
+      // Create an `OAuthCredential` from the credential returned by Apple
+      final oauthCredential = OAuthProvider("apple.com").credential(
+        idToken: appleCredential.identityToken,
+        accessToken: appleCredential.authorizationCode,
+      );
       
-      // If email is not provided (first time sign-in), use user identifier
-      // userIdentifier should always be present, but handle null case
-      if (userId == null) {
-        throw Exception('Apple Sign-In failed: user identifier is null');
+      // Sign in to Firebase with the Apple credential
+      final UserCredential userCredential = await _auth.signInWithCredential(oauthCredential);
+      final user = userCredential.user;
+      
+      if (user != null) {
+        // Create or update user document in Firestore
+        await _firebaseService.createOrUpdateUser(
+          userId: user.uid,
+          email: user.email ?? appleCredential.email ?? '',
+          displayName: appleCredential.givenName != null && appleCredential.familyName != null
+              ? '${appleCredential.givenName} ${appleCredential.familyName}'
+              : user.displayName,
+          photoUrl: user.photoURL,
+        );
+      
+        // Also update SharedPreferences for backward compatibility
+        await login(user.uid);
+      
+        debugPrint('Apple Sign-In successful: ${user.email ?? user.uid}');
+        return user.uid;
       }
-      final String userIdentifier = email ?? userId;
       
-      // Store authentication state
-      await login(userIdentifier);
-      
-      debugPrint('Apple Sign-In successful: $userIdentifier');
-      return userIdentifier;
+      return null;
+    } on FirebaseAuthException catch (e) {
+      debugPrint('Firebase Auth error during Apple Sign-In: ${e.code} - ${e.message}');
+      rethrow;
     } catch (e) {
       debugPrint('Apple Sign-In error: $e');
       rethrow;

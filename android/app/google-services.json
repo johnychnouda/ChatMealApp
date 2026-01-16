@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "914631043261",
+    "project_id": "chatmeal-d8c5c",
+    "storage_bucket": "chatmeal-d8c5c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:914631043261:android:d567e31e43f8f96b1cefd4",
+        "android_client_info": {
+          "package_name": "com.chatmeal.chatmeal"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAjbfo84t2G7qaDSBxkW8b7NRs7gGZSkoU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

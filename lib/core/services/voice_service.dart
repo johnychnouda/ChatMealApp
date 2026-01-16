@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:record/record.dart';
 import 'package:just_audio/just_audio.dart';
@@ -18,6 +19,12 @@ class VoiceService {
   bool _isSpeaking = false;
   File? _currentTempFile; // Track current temp file for cleanup
   String? _currentRecordingPath; // Track current recording file
+  
+  // Silence detection
+  Timer? _silenceDetectionTimer;
+  DateTime? _silenceStartTime;
+  static const double _silenceThreshold = -40.0; // dB - threshold for silence detection
+  static const Duration _silenceDuration = Duration(milliseconds: 1500); // 1.5 seconds of silence
   
   // Callbacks
   Function(String)? onResult;
@@ -107,6 +114,9 @@ class VoiceService {
       );
       
       debugPrint('Voice Service: Recording started');
+      
+      // Start silence detection monitoring
+      _startSilenceDetection();
     } catch (e) {
       debugPrint('Error starting recording: $e');
       _isListening = false;
@@ -118,6 +128,9 @@ class VoiceService {
   /// Stop listening and transcribe using OpenAI Whisper
   Future<void> stopListening() async {
     if (!_isListening) return;
+    
+    // Stop silence detection timer
+    _stopSilenceDetection();
     
     try {
       // Stop recording
@@ -176,6 +189,9 @@ class VoiceService {
   /// Cancel listening
   Future<void> cancelListening() async {
     if (!_isListening) return;
+    
+    // Stop silence detection timer
+    _stopSilenceDetection();
     
     try {
       await _audioRecorder.stop();
@@ -294,8 +310,64 @@ class VoiceService {
     }
   }
   
+  /// Start monitoring for silence detection
+  void _startSilenceDetection() {
+    _silenceStartTime = null;
+    
+    // Check amplitude every 100ms
+    _silenceDetectionTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) async {
+      if (!_isListening) {
+        timer.cancel();
+        return;
+      }
+      
+      try {
+        // Get current amplitude (returns dB, typically -160 to 0)
+        final amplitude = await _audioRecorder.getAmplitude();
+        final currentAmplitude = amplitude.current;
+        
+        debugPrint('Voice Service: Amplitude: $currentAmplitude dB');
+        
+        // Check if amplitude is below silence threshold
+        if (currentAmplitude < _silenceThreshold) {
+          // Silence detected
+          if (_silenceStartTime == null) {
+            // Start tracking silence duration
+            _silenceStartTime = DateTime.now();
+            debugPrint('Voice Service: Silence detected, starting timer...');
+          } else {
+            // Check if silence duration has exceeded threshold
+            final silenceDuration = DateTime.now().difference(_silenceStartTime!);
+            if (silenceDuration >= _silenceDuration) {
+              debugPrint('Voice Service: Silence duration exceeded, auto-stopping...');
+              timer.cancel();
+              // Auto-stop recording
+              await stopListening();
+            }
+          }
+        } else {
+          // Audio detected, reset silence tracking
+          if (_silenceStartTime != null) {
+            debugPrint('Voice Service: Audio detected, resetting silence timer');
+            _silenceStartTime = null;
+          }
+        }
+      } catch (e) {
+        debugPrint('Voice Service: Error checking amplitude: $e');
+      }
+    });
+  }
+  
+  /// Stop silence detection monitoring
+  void _stopSilenceDetection() {
+    _silenceDetectionTimer?.cancel();
+    _silenceDetectionTimer = null;
+    _silenceStartTime = null;
+  }
+  
   /// Dispose resources
   void dispose() {
+    _stopSilenceDetection();
     _audioRecorder.dispose();
     _audioPlayer.dispose();
     _cleanupTempFile();
